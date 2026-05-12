@@ -1,0 +1,90 @@
+# Dune awakening setup bootstrap script
+
+# Variables
+GREEN='\033[0;32m'
+RED='\033[0;31m'
+NC='\033[0m' # No Color
+DUNE_USER_PATH=/home/dune/.dune
+DOWNLOAD_PATH=$DUNE_USER_PATH/download
+
+# Methods
+validate_disk_space() {
+    # Required diskspace
+    diskspace_needed=30
+
+    # Check disksize:
+    available_gb=$(df -B1G -P / | awk '$NF == "/" {print $(NF-2)+0}')
+    if ! [ "$available_gb" -gt $diskspace_needed ]; then
+        available_dev=$(sudo fdisk -l /dev/sda | awk '$1 == "2" {sub(/[GMK].*$/, "", $4); print $4+0}')
+        disk_size=$(sudo fdisk -l /dev/sda | awk '$1 == "2" {print $4}' | sed 's/[GMK]//g')
+
+        if [ "$(echo "$disk_size > $diskspace_needed" | bc -l)" -eq 0 ]; then
+            printf "${RED}Error${NC}: Not enough disk space, please expand your disk size in your hypervisor to at least $diskspace_needed\n"
+            exit 1
+        fi
+
+        echo "Resizing the root volume.."
+        sudo growpart /dev/sda 2
+        sudo pvresize /dev/sda2
+        sudo lvextend -l +100%FREE /dev/mapper/vg0-lv_root
+        sudo resize2fs /dev/mapper/vg0-lv_root
+
+        available_gb_after_resize=$(df -B1G -P / | awk '$NF == "/" {print $(NF-2)+0}')
+        if [ "$available_dev" -gt $diskspace_needed ]; then
+            printf "${GREEN}Success${NC}: Root partition successfully resized\n"
+        else
+            printf "${RED}Error${NC}: Could not resize the root partition.\n"
+            exit 1
+        fi
+    fi
+}
+
+script_folder_exist() {
+    if [ -f "$DOWNLOAD_PATH/scripts/battlegroup.sh" ] && [ -f "$DOWNLOAD_PATH/scripts/setup.sh" ]; then
+        return 0
+    fi
+
+    return 1
+}
+
+steam_download() {
+    echo "Steam product needs updating.."
+
+    while true; do
+            steamcmd +set_spew_level 1 1 +force_install_dir "$DOWNLOAD_PATH" +login anonymous +app_update 3104830 +logoff +quit
+            local steamcmd_exit=$?
+            if [ $steamcmd_exit -eq 0 ]; then
+                    break
+            fi
+            read -p "Steam download failed. Retry? [Y/N] " retry_answer
+            if [[ "${retry_answer,,}" != "y" ]]; then
+                    return 1
+            fi
+    done
+    return 0
+}
+
+main() {
+    # Validate that the VM has enough disk space
+    validate_disk_space
+
+    # Check if the download/script directory exists
+    if ! script_folder_exist; then
+        if ! steam_download ; then
+            printf "${RED}Error${NC}: Steam download failed, exiting."
+            exit 1
+        fi
+
+        if ! script_folder_exist; then
+            printf "${RED}Error${NC}: Steam download succeded but scripts are missing, exiting."
+	    exit 1
+        fi
+    fi
+
+    # Run main setup script
+    "$DOWNLOAD_PATH/scripts/setup.sh"
+    exit 0
+}
+
+# start the script
+main
