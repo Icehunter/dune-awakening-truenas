@@ -35,6 +35,11 @@ var logMenuLabels = []string{"Server Logs", "Operator Logs"}
 // Message types
 type msgLogLine struct{ line string }
 type msgLogDone struct{}
+type msgLogPodFound struct {
+	pod    string
+	source int
+	err    error
+}
 
 func newLogsState() LogsState {
 	vp := viewport.New(viewport.WithWidth(80), viewport.WithHeight(24))
@@ -52,6 +57,30 @@ func listenForLogLine(ch <-chan string) tea.Cmd {
 	}
 }
 
+// cmdFindLogPod discovers the appropriate pod name asynchronously.
+func cmdFindLogPod(source int) tea.Cmd {
+	return func() tea.Msg {
+		var podGrep string
+		switch source {
+		case 0:
+			podGrep = "server-"
+		case 1:
+			podGrep = "operator"
+		}
+		out, err := sshExec(fmt.Sprintf(
+			"sudo kubectl get pods -n %s --no-headers 2>/dev/null | grep '%s' | grep -v db | head -1 | awk '{print $1}'",
+			globalPodNS, podGrep))
+		if err != nil {
+			return msgLogPodFound{err: err}
+		}
+		pod := strings.TrimSpace(out)
+		if pod == "" {
+			return msgLogPodFound{err: fmt.Errorf("pod not found: %s", podGrep)}
+		}
+		return msgLogPodFound{pod: pod, source: source}
+	}
+}
+
 // logsUpdate handles all messages for the Logs tab.
 func logsUpdate(msg tea.Msg, m model) (model, tea.Cmd) {
 	lg := &m.lg
@@ -66,18 +95,36 @@ func logsUpdate(msg tea.Msg, m model) (model, tea.Cmd) {
 		return m, listenForLogLine(lg.streamCh)
 
 	case msgLogDone:
+		if !lg.streaming {
+			// Orphaned listener from a previous stream — ignore
+			return m, nil
+		}
 		lg.streaming = false
 		m.statusMsg, m.statusIsOK = "Stream ended", true
 		return m, nil
 
-	case tea.WindowSizeMsg:
-		lg.vp.SetWidth(msg.Width - 4)
-		h := msg.Height - 8
-		if h < 5 {
-			h = 5
+	case msgLogPodFound:
+		if msg.err != nil {
+			m.statusMsg, m.statusIsOK = msg.err.Error(), false
+			lg.subView = lgvMenu
+			return m, nil
 		}
-		lg.vp.SetHeight(h)
-		return m, nil
+		cmd := fmt.Sprintf("sudo kubectl logs -f -n %s %s 2>&1", globalPodNS, msg.pod)
+		ch, cancel, err := sshStream(cmd)
+		if err != nil {
+			m.statusMsg, m.statusIsOK = err.Error(), false
+			lg.subView = lgvMenu
+			return m, nil
+		}
+		lg.buffer = nil
+		lg.streamCh = ch
+		lg.cancelFn = cancel
+		lg.streaming = true
+		lg.autoScroll = true
+		lg.vp.SetContent("")
+		m.statusMsg = "Streaming: " + msg.pod
+		m.statusIsOK = true
+		return m, listenForLogLine(ch)
 
 	case tea.KeyPressMsg:
 		k := msg.String()
@@ -98,9 +145,10 @@ func logsUpdate(msg tea.Msg, m model) (model, tea.Cmd) {
 					lg.cancelFn()
 					lg.cancelFn = nil
 				}
+				lg.streaming = false
 				lg.buffer = nil
 				lg.vp.SetContent("")
-				return startLogStream(m, lg.menu)
+				return m, cmdFindLogPod(lg.menu)
 			case "e":
 				fname := fmt.Sprintf("%s/dune-logs-%d.txt", os.Getenv("HOME"), time.Now().Unix())
 				_ = os.WriteFile(fname, []byte(strings.Join(lg.buffer, "\n")), 0644)
@@ -139,52 +187,12 @@ func logsUpdate(msg tea.Msg, m model) (model, tea.Cmd) {
 				lg.menu++
 			}
 		case "enter":
-			return startLogStream(m, lg.menu)
+			lg.streaming = false
+			lg.subView = lgvStream
+			return m, cmdFindLogPod(lg.menu)
 		}
 	}
 	return m, nil
-}
-
-// startLogStream discovers the appropriate pod and begins streaming its logs.
-func startLogStream(m model, source int) (model, tea.Cmd) {
-	lg := &m.lg
-
-	var podGrep string
-	switch source {
-	case 0:
-		podGrep = "server-"
-	case 1:
-		podGrep = "operator"
-	}
-
-	podOut, err := sshExec(fmt.Sprintf(
-		"sudo kubectl get pods -n %s --no-headers 2>/dev/null | grep '%s' | grep -v db | head -1 | awk '{print $1}'",
-		globalPodNS, podGrep))
-	if err != nil || strings.TrimSpace(podOut) == "" {
-		m.statusMsg = "Pod not found: " + podGrep
-		m.statusIsOK = false
-		return m, nil
-	}
-
-	pod := strings.TrimSpace(podOut)
-	cmd := fmt.Sprintf("sudo kubectl logs -f -n %s %s 2>&1", globalPodNS, pod)
-	ch, cancel, err := sshStream(cmd)
-	if err != nil {
-		m.statusMsg = err.Error()
-		m.statusIsOK = false
-		return m, nil
-	}
-
-	lg.buffer = nil
-	lg.streamCh = ch
-	lg.cancelFn = cancel
-	lg.streaming = true
-	lg.autoScroll = true
-	lg.subView = lgvStream
-	lg.vp.SetContent("")
-	m.statusMsg = "Streaming: " + pod
-	m.statusIsOK = true
-	return m, listenForLogLine(ch)
 }
 
 // logsView renders the Logs tab.

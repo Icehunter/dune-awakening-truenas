@@ -202,6 +202,13 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.width = msg.Width
 		m.height = msg.Height
 		m = rebuildPlayersTable(m)
+		// Resize the logs viewport to match the new terminal size
+		m.lg.vp.SetWidth(msg.Width - 4)
+		h := msg.Height - 8
+		if h < 5 {
+			h = 5
+		}
+		m.lg.vp.SetHeight(h)
 		return m, nil
 
 	case msgConnect:
