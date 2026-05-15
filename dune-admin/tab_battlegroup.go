@@ -197,7 +197,10 @@ func battlegroupUpdate(msg tea.Msg, m model) (model, tea.Cmd) {
 				bg.loading = true
 				bg.pods = nil
 				return m, tea.Cmd(cmdBGPods)
-			case bgvStart, bgvStop, bgvRestart, bgvUpdate, bgvBackup, bgvRestore:
+			case bgvStart:
+				bg.loading = true
+				return m, cmdBGExec("start")
+			case bgvStop, bgvRestart, bgvUpdate, bgvBackup, bgvRestore:
 				bg.confirm = true
 			}
 		}
