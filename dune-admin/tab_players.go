@@ -381,6 +381,8 @@ func playersHandleMenuKey(k string, m model) (model, tea.Cmd) {
 		}
 	case "enter":
 		return playersActivateMenu(m)
+	case "r":
+		return m, tea.Cmd(cmdFetchPlayers)
 	}
 	return m, nil
 }

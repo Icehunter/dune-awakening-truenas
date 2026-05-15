@@ -15,9 +15,9 @@ type dbSubView int
 const (
 	dbvMenu dbSubView = iota
 	dbvTables
-	dbvResult  // shows describe / sample / search / SQL output
-	dbvSearch  // text input for column search
-	dbvSQL     // text input for raw SQL
+	dbvResult // shows describe / sample / search / SQL output
+	dbvSearch // text input for column search
+	dbvSQL    // text input for raw SQL
 )
 
 // DatabaseState holds all state for the Database tab.
