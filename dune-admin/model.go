@@ -186,6 +186,7 @@ func initialModel() model {
 	return model{
 		pl: newPlayersState(),
 		db: newDatabaseState(),
+		lg: newLogsState(),
 	}
 }
 
