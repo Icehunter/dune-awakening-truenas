@@ -20,7 +20,7 @@ const (
 	pvInventory
 	pvCurrency
 	pvFactions
-	pvFactionRep
+	_ // pvFactionRep was removed (unused)
 	pvSpecializations
 	pvGiveItem
 	pvGiveCurrency
@@ -47,7 +47,6 @@ type PlayersState struct {
 
 	tbl               table.Model
 	selectedPlayerIdx int
-	selectedFactionID int16
 
 	inputSteps  []inputStep
 	inputCursor int

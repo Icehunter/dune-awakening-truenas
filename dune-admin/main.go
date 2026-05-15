@@ -295,28 +295,28 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if k == "ctrl+c" {
 			return m, tea.Quit
 		}
-		switch k {
-		case "1":
-			m.activeTab = 0
-			return m, nil
-		case "2":
-			m.activeTab = 1
-			return m, nil
-		case "3":
-			m.activeTab = 2
-			return m, nil
-		case "4":
-			m.activeTab = 3
-			return m, nil
+		// Only switch tabs when not inside a text input wizard
+		if !playersIsInputState(m) {
+			switch k {
+			case "1":
+				m.activeTab = 0
+				return m, nil
+			case "2":
+				m.activeTab = 1
+				return m, nil
+			case "3":
+				m.activeTab = 2
+				return m, nil
+			case "4":
+				m.activeTab = 3
+				return m, nil
+			}
 		}
 	}
 
-	// delegate to active tab
-	switch m.activeTab {
-	case 1:
-		return playersUpdate(msg, m)
-	}
-	return m, nil
+	// delegate to players tab unconditionally — playersUpdate handles its own
+	// message types and returns m, nil for anything it doesn't recognize.
+	return playersUpdate(msg, m)
 }
 
 // ── table helpers ─────────────────────────────────────────────────────────────
