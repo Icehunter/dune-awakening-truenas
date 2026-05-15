@@ -395,7 +395,7 @@ func playersActivateMenu(m model) (model, tea.Cmd) {
 	}
 	switch menuItems[idx].view {
 	case pvPlayers:
-		return m, func() tea.Msg { return cmdFetchPlayers() }
+		return m, tea.Cmd(cmdFetchPlayers)
 	case pvInventory:
 		return playersStartWizard(pvInventory, []inputStep{
 			{prompt: "Player ID", hint: "numeric actor ID (see Players view)"},

@@ -72,6 +72,9 @@ func cmdFetchInventory(playerID int64) tea.Cmd {
 			}
 			items = append(items, it)
 		}
+		if err := rows.Err(); err != nil {
+			return msgInventory{err: err}
+		}
 		return msgInventory{rows: items}
 	}
 }
@@ -96,6 +99,9 @@ func cmdFetchCurrency() tea.Msg {
 			continue
 		}
 		out = append(out, r)
+	}
+	if err := rows.Err(); err != nil {
+		return msgCurrency{err: err}
 	}
 	return msgCurrency{rows: out}
 }
@@ -131,6 +137,9 @@ func cmdFetchFactions() tea.Msg {
 		}
 		out = append(out, r)
 	}
+	if err := rows.Err(); err != nil {
+		return msgFactions{err: err}
+	}
 	return msgFactions{rows: out, scripCurrencyID: scripID}
 }
 
@@ -154,6 +163,9 @@ func cmdFetchSpecs() tea.Msg {
 			continue
 		}
 		out = append(out, r)
+	}
+	if err := rows.Err(); err != nil {
+		return msgSpecs{err: err}
 	}
 	return msgSpecs{rows: out}
 }
@@ -805,6 +817,9 @@ func cmdDescribeTable(tbl string) tea.Cmd {
 			}
 			cols = append(cols, c)
 		}
+		if err := rows.Err(); err != nil {
+			return msgDescribe{table: tbl, err: err}
+		}
 		return msgDescribe{table: tbl, cols: cols}
 	}
 }
@@ -837,6 +852,9 @@ func cmdSampleTable(tbl string, limit int) tea.Cmd {
 			}
 			result = append(result, row)
 		}
+		if err := rows.Err(); err != nil {
+			return msgSample{table: tbl, err: err}
+		}
 		return msgSample{table: tbl, headers: headers, rows: result}
 	}
 }
@@ -864,6 +882,9 @@ func cmdSearchColumns(term string) tea.Cmd {
 				return msgSearchCols{err: err}
 			}
 			result = append(result, []string{table, col, dtype})
+		}
+		if err := rows.Err(); err != nil {
+			return msgSearchCols{err: err}
 		}
 		return msgSearchCols{headers: headers, rows: result}
 	}

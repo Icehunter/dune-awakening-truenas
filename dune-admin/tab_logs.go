@@ -87,6 +87,10 @@ func logsUpdate(msg tea.Msg, m model) (model, tea.Cmd) {
 
 	switch msg := msg.(type) {
 	case msgLogLine:
+		if !lg.streaming {
+			// Orphaned line from a cancelled stream — discard
+			return m, nil
+		}
 		lg.buffer = append(lg.buffer, msg.line)
 		lg.vp.SetContent(strings.Join(lg.buffer, "\n"))
 		if lg.autoScroll {
