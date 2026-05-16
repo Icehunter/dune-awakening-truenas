@@ -69,6 +69,7 @@ The bot runs entirely inside the cluster. `deploy.sh` only needs SSH access to t
 | SSH key | — | Pre-installed on VM; auto-detected by `deploy.sh` |
 | VM access | port 22 | To run `deploy.sh` |
 | k3s cluster | running | Must have the Dune server Deployment active |
+| VM OS | Alpine Linux | The target VM runs Alpine — `openssh-sftp-server` must be installed (see below) |
 
 ### SSH key
 
@@ -161,6 +162,18 @@ Both scripts perform the same steps:
 6. Tails the last 40 log lines
 
 ### First-time deploy
+
+#### VM prerequisites (Alpine Linux)
+
+The target VM runs Alpine Linux. Before the first deploy, SSH in and ensure the SFTP subsystem is available — SCP will fail with `sftp-server: No such file or directory` without it:
+
+```bash
+sudo apk add openssh-sftp-server
+sudo sed -i 's|^#\?Subsystem sftp .*|Subsystem sftp /usr/lib/ssh/sftp-server|' /etc/ssh/sshd_config
+sudo rc-service sshd restart
+```
+
+#### Cluster setup
 
 On a fresh VM the k3s Deployment and namespace do not yet exist. `deploy.sh` creates them via `kubectl apply`. The required directories (`/opt/market-bot/{bin,data,cache}`) are created automatically.
 
