@@ -18,12 +18,29 @@ fi
 
 JQ_FILTER='
   def extract($item; $s):
+    (if ($s.categories | type) == "number"
+     then ($item[$s.categories] | if type == "array"
+           then [.[] | $item[.]] | map(select(type=="string")) |
+                # When an item appears in multiple depth-2 misc subcategories (e.g. both
+                # items/misc/fuel and items/misc/refinedresources), prefer the shorter/more-
+                # specific misc path rather than blindly taking the longest string.
+                (if any(test("^items/misc/[^/]+$"))
+                 then map(select(test("^items/misc/[^/]+$"))) | sort_by(length) | first
+                 else sort_by(length) | last end)
+           else null end)
+     else null end) as $catPath |
+    (if ($s.itemTags | type) == "number"
+     then [$item[$s.itemTags][] | $item[.]]
+     else [] end) as $tags |
     {
-      name:      (if $s.name        | type == "number" then $item[$s.name]        else null end),
-      stack_max: (if $s.maxStackSize | type == "number" then $item[$s.maxStackSize] else 1   end // 1),
-      volume:    (if $s.volume       | type == "number" then $item[$s.volume]       else 0   end // 0),
-      tier:      (if $s.tier         | type == "number" then $item[$s.tier]         else null end),
-      rarity:    (if $s.rarity       | type == "number" then $item[$s.rarity]       else null end)
+      name:         (if $s.name        | type == "number" then $item[$s.name]        else null end),
+      stack_max:    (if $s.maxStackSize | type == "number" then $item[$s.maxStackSize] else 1   end // 1),
+      volume:       (if $s.volume       | type == "number" then $item[$s.volume]       else 0   end // 0),
+      tier:         (if $s.tier         | type == "number" then $item[$s.tier]         else null end),
+      rarity:       (if $s.rarity       | type == "number" then $item[$s.rarity]       else null end),
+      vendor_price: (if $s.baseBuyFromVendorPrice | type == "number" then $item[$s.baseBuyFromVendorPrice] else null end),
+      category:     $catPath,
+      tradeable:    ($tags | any(. == "Items.ExcludeFromExchange" or . == "Items.ActorBoundItem") | not)
     };
   {
     default_stack_max: 1,

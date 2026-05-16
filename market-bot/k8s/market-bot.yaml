@@ -1,0 +1,142 @@
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: dune-market-bot
+
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: market-bot-config
+  namespace: dune-market-bot
+data:
+  # Paths inside the container — item data files are copied from the repo
+  ITEM_DATA_PATH: /data/item-data.json
+  ITEM_NAMES_PATH: /data/dune-item-names.json
+  CACHE_DB_PATH: /cache/market-bot-cache.db
+  DB_HOST: sh-ec68e59f636959ac-kbzgra-db-dbdepl-svc.funcom-seabass-sh-ec68e59f636959ac-kbzgra.svc.cluster.local
+  DB_PORT: "15432"
+  DB_USER: dune
+  DB_NAME: dune
+  INTERVAL: 5m
+
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: market-bot-secret
+  namespace: dune-market-bot
+type: Opaque
+stringData:
+  DB_PASS: dune
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: market-bot
+  namespace: dune-market-bot
+  labels:
+    app: market-bot
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: market-bot
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        app: market-bot
+    spec:
+      restartPolicy: Always
+      containers:
+        - name: market-bot
+          image: alpine:3.19
+          imagePullPolicy: IfNotPresent
+          command: ["/app/market-bot"]
+          args:
+            - -dbhost=$(DB_HOST)
+            - -dbport=$(DB_PORT)
+            - -dbuser=$(DB_USER)
+            - -dbpass=$(DB_PASS)
+            - -dbname=$(DB_NAME)
+            - -itemdata=$(ITEM_DATA_PATH)
+            - -itemnames=$(ITEM_NAMES_PATH)
+            - -cachedb=$(CACHE_DB_PATH)
+            - -interval=$(INTERVAL)
+          env:
+            - name: DB_HOST
+              valueFrom:
+                configMapKeyRef:
+                  name: market-bot-config
+                  key: DB_HOST
+            - name: DB_PORT
+              valueFrom:
+                configMapKeyRef:
+                  name: market-bot-config
+                  key: DB_PORT
+            - name: DB_USER
+              valueFrom:
+                configMapKeyRef:
+                  name: market-bot-config
+                  key: DB_USER
+            - name: DB_PASS
+              valueFrom:
+                secretKeyRef:
+                  name: market-bot-secret
+                  key: DB_PASS
+            - name: DB_NAME
+              valueFrom:
+                configMapKeyRef:
+                  name: market-bot-config
+                  key: DB_NAME
+            - name: ITEM_DATA_PATH
+              valueFrom:
+                configMapKeyRef:
+                  name: market-bot-config
+                  key: ITEM_DATA_PATH
+            - name: ITEM_NAMES_PATH
+              valueFrom:
+                configMapKeyRef:
+                  name: market-bot-config
+                  key: ITEM_NAMES_PATH
+            - name: INTERVAL
+              valueFrom:
+                configMapKeyRef:
+                  name: market-bot-config
+                  key: INTERVAL
+            - name: CACHE_DB_PATH
+              valueFrom:
+                configMapKeyRef:
+                  name: market-bot-config
+                  key: CACHE_DB_PATH
+          volumeMounts:
+            - name: binary
+              mountPath: /app/market-bot
+            - name: item-data
+              mountPath: /data
+            - name: cache
+              mountPath: /cache
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 200m
+              memory: 128Mi
+      volumes:
+        - name: binary
+          hostPath:
+            path: /opt/market-bot/bin/market-bot
+            type: File
+        - name: item-data
+          hostPath:
+            path: /opt/market-bot/data
+            type: DirectoryOrCreate
+        - name: cache
+          hostPath:
+            path: /opt/market-bot/cache
+            type: DirectoryOrCreate

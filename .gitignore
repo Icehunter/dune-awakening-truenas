@@ -13,6 +13,8 @@ dune-admin/fetch-item-data.js
 # Compiled binaries
 dune-admin/dune-admin
 dune-admin/dune-admin-linux
+market-bot/market-bot-linux
+market-bot/dune-market-bot
 
 # macOS
 .DS_Store
