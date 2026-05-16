@@ -66,8 +66,39 @@ cmd_update() {
 }
 
 cmd_shell_vm() {
+    if [[ ! -f "$SSH_KEY" ]]; then
+        echo -e "${RED}SSH key not found: $SSH_KEY${NC}"
+        echo -e "Run: $0 setup-key"
+        exit 1
+    fi
     echo -e "${CYAN}Opening SSH shell to VM (type 'exit' to return)...${NC}"
     ssh_tty
+}
+
+cmd_setup_key() {
+    if [[ -f "$SSH_KEY" ]]; then
+        echo -e "${YELLOW}SSH key already exists at $SSH_KEY${NC}"
+        read -rp "Replace it? [y/N] " confirm
+        [[ "$confirm" != "y" && "$confirm" != "Y" ]] && return
+    fi
+
+    echo -e "${CYAN}Generating new SSH key pair...${NC}"
+    ssh-keygen -t ed25519 -f "$SSH_KEY" -C "dune-vm@$(hostname -s)" -N ""
+    chmod 600 "$SSH_KEY"
+    local pub_key
+    pub_key=$(cat "${SSH_KEY}.pub")
+    echo -e "${GREEN}Generated: $SSH_KEY${NC}"
+
+    echo -e "${CYAN}Enter the VM password when prompted...${NC}"
+    if ssh-copy-id -i "${SSH_KEY}.pub" \
+        -o StrictHostKeyChecking=no \
+        -o PasswordAuthentication=yes \
+        "${VM_USER}@${VM_IP}"; then
+        echo -e "${GREEN}Key installed. You can now use: $0 shell-vm${NC}"
+    else
+        echo -e "${RED}Installation failed.${NC}"
+        echo "Public key: $pub_key"
+    fi
 }
 
 cmd_shell_pod() {
@@ -172,7 +203,8 @@ show_menu() {
     echo "  9. logs-export       Export battlegroup logs"
     echo " 10. open-director     Open Director web UI"
     echo " 11. open-filebrowser  Open file browser"
-    echo " 12. quit              Exit"
+    echo " 12. setup-key         Generate + install SSH key (use when locked out)"
+    echo " 13. quit              Exit"
     echo ""
 }
 
@@ -193,6 +225,7 @@ main() {
             logs-export) cmd_logs_export ;;
             open-director) cmd_open_director ;;
             open-filebrowser) cmd_open_filebrowser ;;
+            setup-key) cmd_setup_key ;;
             *) echo "Unknown command: $1"; exit 1 ;;
         esac
         exit 0
@@ -201,7 +234,7 @@ main() {
     # Interactive menu mode
     while true; do
         show_menu
-        read -rp "Select option (1-12): " choice
+        read -rp "Select option (1-13): " choice
         case "$choice" in
             1) cmd_list ;;
             2) cmd_status ;;
@@ -214,7 +247,8 @@ main() {
             9) cmd_logs_export ;;
             10) cmd_open_director ;;
             11) cmd_open_filebrowser ;;
-            12) echo "Goodbye!"; exit 0 ;;
+            12) cmd_setup_key ;;
+            13) echo "Goodbye!"; exit 0 ;;
             *) echo -e "${YELLOW}Invalid choice${NC}" ;;
         esac
     done

@@ -1,0 +1,22 @@
+# SSH keys — never commit
+sshKey
+sshKey.pub
+dune-admin/sshKey
+
+# Generated item data — built locally via fetch-item-data.js + build-item-data.sh
+dune-admin/item-data-raw.json
+# dune-admin/item-data.json
+
+# Browser fetch script — local dev tool, not for sharing
+dune-admin/fetch-item-data.js
+
+# Compiled binaries
+dune-admin/dune-admin
+dune-admin/dune-admin-linux
+
+# macOS
+.DS_Store
+**/.DS_Store
+
+settings.local.json
+steamcmd/*
