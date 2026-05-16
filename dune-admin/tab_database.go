@@ -278,10 +278,14 @@ func renderGridResult(title string, headers []string, rows [][]string) string {
 // databaseView renders the Database tab.
 func databaseView(m model) string {
 	db := m.db
-	menuW := 22
-	contentW := m.width - menuW - 5
+	menuW := 24
+	contentW := m.width - menuW - 1
 	if contentW < 10 {
 		contentW = 10
+	}
+	inner := m.height - 4
+	if inner < 5 {
+		inner = 5
 	}
 
 	// Left menu pane
@@ -302,7 +306,10 @@ func databaseView(m model) string {
 		}
 		menuLines = append(menuLines, line)
 	}
-	menuPane := stylePanelBorder.Width(menuW).Render(strings.Join(menuLines, "\n"))
+	for len(menuLines) < inner {
+		menuLines = append(menuLines, "")
+	}
+	menuPane := stylePanelBorder.Width(menuW).Height(inner).Render(strings.Join(menuLines, "\n"))
 
 	// Right content pane
 	var body string
@@ -327,10 +334,10 @@ func databaseView(m model) string {
 			styleHelp.Render("  Tables/Describe/Sample all open the table list.\n  Use Enter or d after selecting a table.")
 	}
 
-	contentPane := stylePanelBorderFocused.Width(contentW).Render(body)
-	help := styleHelp.Render("  ↑↓ navigate   Enter select   Esc back")
-	return lipgloss.JoinVertical(lipgloss.Left,
-		lipgloss.JoinHorizontal(lipgloss.Top, menuPane, contentPane),
-		help,
-	)
+	bodyLines := strings.Split(body, "\n")
+	for len(bodyLines) < inner {
+		bodyLines = append(bodyLines, "")
+	}
+	contentPane := stylePanelBorderFocused.Width(contentW).Height(inner).Render(strings.Join(bodyLines, "\n"))
+	return lipgloss.JoinHorizontal(lipgloss.Top, menuPane, contentPane)
 }

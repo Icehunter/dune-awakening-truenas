@@ -83,14 +83,6 @@ var menuItems = []menuItem{
 
 var menuQuitIdx = len(menuItems) - 1
 
-var itemTemplates = []string{
-	"Stone", "MelangeSpice", "SpiceResidue", "SteelBar", "Oil", "ScrapMetal",
-	"T2MachineComponent", "T3MiningGalleryComponent1", "WormTooth",
-	"Ammo", "HeavyAmmo", "HealthPack_Channeled_3", "Solaris",
-	"PowerPack", "MiningTool_1h_Standard", "BasicBuildingTool",
-	"OrnithopterLightEngine_4", "VehicleBackupTool",
-}
-
 // ── table construction ────────────────────────────────────────────────────────
 
 func rebuildPlayersTable(m model) model {
@@ -106,12 +98,12 @@ func rebuildPlayersTable(m model) model {
 	case pvPlayers:
 		cols := []table.Column{
 			{Title: "ID", Width: 8},
-			{Title: "Account", Width: 12},
-			{Title: "Class", Width: 20},
+			{Title: "Name", Width: 20},
+			{Title: "Class", Width: 18},
 			{Title: "Map", Width: 16},
 			{Title: "Faction", Width: 12},
 		}
-		fixed := 8 + 12 + 16 + 12 + 4*3
+		fixed := 8 + 20 + 16 + 12 + 4*3
 		extra := w - fixed - 2
 		if extra > 10 {
 			cols[2].Width = extra
@@ -120,7 +112,7 @@ func rebuildPlayersTable(m model) model {
 		for _, p := range m.pl.players {
 			rows = append(rows, table.Row{
 				fmt.Sprintf("%d", p.ID),
-				fmt.Sprintf("%d", p.AccountID),
+				p.Name,
 				p.Class,
 				p.Map,
 				factionDisplayName(p.FactionID),
@@ -398,7 +390,7 @@ func playersActivateMenu(m model) (model, tea.Cmd) {
 		return m, tea.Cmd(cmdFetchPlayers)
 	case pvInventory:
 		return playersStartWizard(pvInventory, []inputStep{
-			{prompt: "Player ID", hint: "numeric actor ID (see Players view)"},
+			{prompt: "Player name", hint: "type name, Tab to autocomplete"},
 		}, m)
 	case pvCurrency:
 		return m, func() tea.Msg { return cmdFetchCurrency() }
@@ -408,30 +400,30 @@ func playersActivateMenu(m model) (model, tea.Cmd) {
 		return m, func() tea.Msg { return cmdFetchSpecs() }
 	case pvGiveItem:
 		return playersStartWizard(pvGiveItem, []inputStep{
-			{prompt: "Player Character ID", hint: "numeric actor ID"},
+			{prompt: "Player name", hint: "type name, Tab to autocomplete"},
 			{prompt: "Item template", hint: "e.g. MelangeSpice  (Tab to autocomplete)"},
 			{prompt: "Quantity", hint: "default: 1"},
 			{prompt: "Quality level", hint: "0 = default, 1-4 for higher tier"},
 		}, m)
 	case pvGiveCurrency:
 		return playersStartWizard(pvGiveCurrency, []inputStep{
-			{prompt: "Player Controller ID", hint: "numeric actor ID"},
+			{prompt: "Player name", hint: "type name, Tab to autocomplete"},
 			{prompt: "Amount to add", hint: "Solaris delta (use negative to subtract)"},
 		}, m)
 	case pvGiveFactionRep:
 		return playersStartWizard(pvGiveFactionRep, []inputStep{
-			{prompt: "PlayerController Actor ID", hint: "actor ID where faction rep is stored (see Factions view — use the Actor ID column)"},
+			{prompt: "Player name", hint: "type name, Tab to autocomplete"},
 			{prompt: "Faction ID", hint: "1=Atreides  2=Harkonnen  4=Smuggler"},
 			{prompt: "Scrip delta", hint: "amount to add (negative to subtract) — tier tags auto-synced"},
 		}, m)
 	case pvGiveLandsraadScrip:
 		return playersStartWizard(pvGiveLandsraadScrip, []inputStep{
-			{prompt: "PlayerController Actor ID", hint: "actor ID with a faction assigned"},
+			{prompt: "Player name", hint: "type name, Tab to autocomplete"},
 			{prompt: "Scrip delta", hint: "amount to add (negative to subtract)"},
 		}, m)
 	case pvAwardXP:
 		return playersStartWizard(pvAwardXP, []inputStep{
-			{prompt: "Player ID", hint: "actor ID from Specializations view"},
+			{prompt: "Player name", hint: "type name, Tab to autocomplete"},
 			{prompt: "Track", hint: "Combat  Crafting  Gathering  Exploration  Sabotage"},
 			{prompt: "XP to add", hint: "integer (44182 = max level)"},
 		}, m)
@@ -473,9 +465,14 @@ func playersHandleInputKey(msg tea.KeyPressMsg, m model) (model, tea.Cmd) {
 	case "tab":
 		if m.pl.view == pvGiveItem && m.pl.inputCursor == 1 {
 			cur := strings.ToLower(m.pl.textInput.Value())
-			for _, t := range itemTemplates {
-				if strings.HasPrefix(strings.ToLower(t), cur) {
-					m.pl.textInput.SetValue(t)
+			if matches := itemSuggestions(cur, 1); len(matches) > 0 {
+				m.pl.textInput.SetValue(matches[0])
+			}
+		} else if m.pl.inputCursor == 0 {
+			cur := strings.ToLower(m.pl.textInput.Value())
+			for _, p := range m.pl.players {
+				if p.Name != "" && (cur == "" || strings.HasPrefix(strings.ToLower(p.Name), cur)) {
+					m.pl.textInput.SetValue(p.Name)
 					break
 				}
 			}
@@ -520,14 +517,36 @@ func playersExecuteWizard(m model) (model, tea.Cmd) {
 		return int32(parseInt(s, int64(def)))
 	}
 
+	// Resolve a player name to their pawn ID (for inventory/items/XP).
+	lookupPawnID := func(name string) int64 {
+		name = strings.TrimSpace(name)
+		for _, p := range m.pl.players {
+			if strings.EqualFold(p.Name, name) {
+				return p.ID
+			}
+		}
+		return parseInt(name, 0) // fallback: treat as raw ID
+	}
+
+	// Resolve a player name to their controller ID (for currency/faction/scrip).
+	lookupControllerID := func(name string) int64 {
+		name = strings.TrimSpace(name)
+		for _, p := range m.pl.players {
+			if strings.EqualFold(p.Name, name) {
+				return p.ControllerID
+			}
+		}
+		return parseInt(name, 0) // fallback: treat as raw ID
+	}
+
 	switch m.pl.view {
 	case pvInventory:
-		id := parseInt(vals[0].value, 0)
+		id := lookupPawnID(vals[0].value)
 		m.pl.prevView = pvMenu
 		return m, cmdFetchInventory(id)
 
 	case pvGiveItem:
-		playerID := parseInt(vals[0].value, 0)
+		playerID := lookupPawnID(vals[0].value)
 		template := strings.TrimSpace(vals[1].value)
 		qty := parseInt(vals[2].value, 1)
 		quality := parseInt(vals[3].value, 0)
@@ -535,26 +554,26 @@ func playersExecuteWizard(m model) (model, tea.Cmd) {
 		return m, cmdGiveItem(playerID, template, qty, quality)
 
 	case pvGiveCurrency:
-		playerID := parseInt(vals[0].value, 0)
+		controllerID := lookupControllerID(vals[0].value)
 		amount := parseInt(vals[1].value, 0)
 		m.pl.view = pvMenu
-		return m, cmdGiveCurrency(playerID, amount)
+		return m, cmdGiveCurrency(controllerID, amount)
 
 	case pvGiveFactionRep:
-		actorID := parseInt(vals[0].value, 0)
+		controllerID := lookupControllerID(vals[0].value)
 		factionID := int16(parseInt(vals[1].value, 0))
 		delta := parseInt32(vals[2].value, 0)
 		m.pl.view = pvMenu
-		return m, cmdGiveFactionRep(actorID, factionID, delta)
+		return m, cmdGiveFactionRep(controllerID, factionID, delta)
 
 	case pvGiveLandsraadScrip:
-		actorID := parseInt(vals[0].value, 0)
+		controllerID := lookupControllerID(vals[0].value)
 		delta := parseInt32(vals[1].value, 0)
 		m.pl.view = pvMenu
-		return m, cmdGiveLandsraadScrip(actorID, delta)
+		return m, cmdGiveLandsraadScrip(controllerID, delta)
 
 	case pvAwardXP:
-		playerID := parseInt(vals[0].value, 0)
+		playerID := lookupPawnID(vals[0].value)
 		track := strings.TrimSpace(vals[1].value)
 		delta := parseInt32(vals[2].value, 0)
 		m.pl.view = pvMenu
@@ -724,25 +743,118 @@ func renderPlayersWizardStep(m model, step inputStep, w, h int) string {
 	sb.WriteString("\n\n")
 	sb.WriteString("  " + m.pl.textInput.View())
 
-	if m.pl.view == pvGiveItem && m.pl.inputCursor == 1 {
-		cur := strings.ToLower(m.pl.textInput.Value())
+	cur := strings.ToLower(m.pl.textInput.Value())
+	if m.pl.inputCursor == 0 {
+		// Player name suggestions on every wizard step 0.
 		sb.WriteString("\n\n")
-		sb.WriteString(styleDim.Render("  Available (Tab to complete):"))
+		sb.WriteString(styleDim.Render("  Players (Tab to complete):"))
 		sb.WriteString("\n")
 		count := 0
-		for _, t := range itemTemplates {
-			if cur == "" || strings.HasPrefix(strings.ToLower(t), cur) {
-				sb.WriteString(styleDim.Render("    · " + t))
+		for _, p := range m.pl.players {
+			if p.Name != "" && (cur == "" || strings.HasPrefix(strings.ToLower(p.Name), cur)) {
+				sb.WriteString(styleDim.Render("    · " + p.Name))
 				sb.WriteString("\n")
 				count++
-				if count >= 8 {
+				if count >= 20 {
 					break
 				}
 			}
 		}
+		if len(m.pl.players) == 0 {
+			sb.WriteString(styleDim.Render("    (loading…)"))
+			sb.WriteString("\n")
+		}
+	} else if m.pl.view == pvGiveItem && m.pl.inputCursor == 1 {
+		sb.WriteString("\n\n")
+		sb.WriteString(styleDim.Render("  Items (Tab to complete, searches template & name):"))
+		sb.WriteString("\n")
+		matches := itemSuggestions(cur, 20)
+		for _, t := range matches {
+			sb.WriteString(styleDim.Render("    · " + itemDisplayLine(t)))
+			sb.WriteString("\n")
+		}
+		if len(dbItemTemplates) == 0 && itemData.Items == nil {
+			sb.WriteString(styleDim.Render("    (loading…)"))
+			sb.WriteString("\n")
+		}
 	}
 
 	return sb.String()
+}
+
+// ── item search helpers ───────────────────────────────────────────────────────
+
+// itemSuggestions returns up to n template_ids whose template prefix OR display
+// name contains cur (case-insensitive). Template-prefix matches come first.
+func itemSuggestions(cur string, n int) []string {
+	seen := make(map[string]bool)
+	var out []string
+
+	add := func(t string) bool {
+		if seen[strings.ToLower(t)] {
+			return false
+		}
+		seen[strings.ToLower(t)] = true
+		out = append(out, t)
+		return len(out) < n
+	}
+
+	// Pass 1: template prefix match (already sorted, PascalCase from DB first).
+	for _, t := range dbItemTemplates {
+		if cur == "" || strings.HasPrefix(strings.ToLower(t), cur) {
+			if !add(t) {
+				return out
+			}
+		}
+	}
+
+	// Pass 2: name substring match against duneItemNames (authoritative names + PascalCase IDs).
+	for _, entry := range duneItemNames {
+		if cur != "" && !strings.Contains(strings.ToLower(entry.Name), cur) {
+			continue
+		}
+		if !add(entry.ID) {
+			return out
+		}
+	}
+
+	// Pass 3: name substring match against itemData for items not in duneItemNames.
+	if itemData.Items != nil {
+		for k, rule := range itemData.Items {
+			if rule.Name == "" {
+				continue
+			}
+			if cur != "" && !strings.Contains(strings.ToLower(rule.Name), cur) {
+				continue
+			}
+			template := k
+			for _, t := range dbItemTemplates {
+				if strings.ToLower(t) == k {
+					template = t
+					break
+				}
+			}
+			if !add(template) {
+				return out
+			}
+		}
+	}
+	return out
+}
+
+// itemDisplayLine returns "template  Name" when a display name is known,
+// preferring dune-item-names.json over item-data.json.
+func itemDisplayLine(template string) string {
+	key := strings.ToLower(template)
+	if entry, ok := duneItemNames[key]; ok && entry.Name != "" {
+		return fmt.Sprintf("%-40s  %s", template, entry.Name)
+	}
+	if itemData.Items != nil {
+		if rule, ok := itemData.Items[key]; ok && rule.Name != "" {
+			return fmt.Sprintf("%-40s  %s", template, rule.Name)
+		}
+	}
+	return template
 }
 
 // ── helpers ───────────────────────────────────────────────────────────────────

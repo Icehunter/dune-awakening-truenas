@@ -9,13 +9,13 @@ import (
 	"strings"
 
 	tea "charm.land/bubbletea/v2"
-	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
 	"golang.org/x/crypto/ssh"
 )
 
 var (
 	globalSSH   *ssh.Client
-	globalDB    *pgx.Conn
+	globalDB    *pgxpool.Pool
 	globalPodIP string
 	globalPodNS string
 )
@@ -46,40 +46,42 @@ func cmdConnect() tea.Msg {
 	if err != nil {
 		return msgConnect{err: fmt.Errorf("SSH session: %w", err)}
 	}
+	// Use jsonpath to extract namespace + podIP directly — avoids awk column
+	// miscount when RESTARTS shows "1 (32m ago)" instead of "0".
 	out, err := sess.CombinedOutput(
-		`sudo kubectl get pods -A -o wide 2>/dev/null | grep db-dbdepl-sts | head -1 | awk '{print $1, $7}'`)
+		`sudo kubectl get pods -A -o jsonpath='{range .items[*]}{.metadata.namespace}{" "}{.metadata.name}{" "}{.status.podIP}{"\n"}{end}' 2>/dev/null | grep db-dbdepl-sts | head -1`)
 	sess.Close()
 	if err != nil {
 		return msgConnect{err: fmt.Errorf("kubectl: %w", err)}
 	}
 
 	parts := strings.Fields(strings.TrimSpace(string(out)))
-	if len(parts) < 2 {
+	if len(parts) < 3 {
 		return msgConnect{err: fmt.Errorf("db pod not found")}
 	}
 	globalPodNS = parts[0]
-	podIP := parts[1]
+	podIP := parts[2]
 	globalSSH = client
 	globalPodIP = podIP
 
 	connStr := fmt.Sprintf(
 		"host=127.0.0.1 port=%d user=%s password=%s dbname=%s sslmode=disable",
 		dbPort, dbUser, dbPass, dbName)
-	pgCfg, err := pgx.ParseConfig(connStr)
+	poolCfg, err := pgxpool.ParseConfig(connStr)
 	if err != nil {
 		return msgConnect{err: err}
 	}
-	pgCfg.LookupFunc = func(_ context.Context, _ string) ([]string, error) {
+	poolCfg.ConnConfig.LookupFunc = func(_ context.Context, _ string) ([]string, error) {
 		return []string{globalPodIP}, nil
 	}
-	pgCfg.DialFunc = func(_ context.Context, _, _ string) (net.Conn, error) {
+	poolCfg.ConnConfig.DialFunc = func(_ context.Context, _, _ string) (net.Conn, error) {
 		return globalSSH.Dial("tcp", fmt.Sprintf("%s:%d", globalPodIP, dbPort))
 	}
-	db, err := pgx.ConnectConfig(context.Background(), pgCfg)
+	pool, err := pgxpool.NewWithConfig(context.Background(), poolCfg)
 	if err != nil {
 		return msgConnect{err: fmt.Errorf("DB connect: %w", err)}
 	}
-	globalDB = db
+	globalDB = pool
 	return msgConnect{}
 }
 

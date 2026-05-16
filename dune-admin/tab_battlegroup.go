@@ -229,13 +229,17 @@ func bgExecForSubView(sv bgSubView) tea.Cmd {
 // battlegroupView renders the Battlegroup tab.
 func battlegroupView(m model) string {
 	bg := m.bg
-	menuW := 22
-	contentW := m.width - menuW - 5
+	menuW := 24
+	contentW := m.width - menuW - 1
 	if contentW < 10 {
 		contentW = 10
 	}
+	inner := m.height - 4
+	if inner < 5 {
+		inner = 5
+	}
 
-	// Left menu pane
+	// Left menu pane — pre-pad to inner lines so Height() fills correctly
 	var menuLines []string
 	for i, label := range bgMenuLabels {
 		if i == bg.menu {
@@ -244,7 +248,10 @@ func battlegroupView(m model) string {
 			menuLines = append(menuLines, styleDim.Render("  "+label))
 		}
 	}
-	menuPane := stylePanelBorder.Width(menuW).Render(strings.Join(menuLines, "\n"))
+	for len(menuLines) < inner {
+		menuLines = append(menuLines, "")
+	}
+	menuPane := stylePanelBorder.Width(menuW).Height(inner).Render(strings.Join(menuLines, "\n"))
 
 	// Right content pane
 	var body string
@@ -281,11 +288,12 @@ func battlegroupView(m model) string {
 		body = styleDim.Render("  Select an action and press Enter.")
 	}
 
-	contentPane := stylePanelBorderFocused.Width(contentW).Render(body)
+	// Pre-pad body to inner lines so Height() fills correctly
+	bodyLines := strings.Split(body, "\n")
+	for len(bodyLines) < inner {
+		bodyLines = append(bodyLines, "")
+	}
+	contentPane := stylePanelBorderFocused.Width(contentW).Height(inner).Render(strings.Join(bodyLines, "\n"))
 
-	help := styleHelp.Render("  ↑↓ navigate   Enter select   r refresh status   Esc back")
-	return lipgloss.JoinVertical(lipgloss.Left,
-		lipgloss.JoinHorizontal(lipgloss.Top, menuPane, contentPane),
-		help,
-	)
+	return lipgloss.JoinHorizontal(lipgloss.Top, menuPane, contentPane)
 }

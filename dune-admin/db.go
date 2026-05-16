@@ -20,10 +20,14 @@ func cmdFetchPlayers() tea.Msg {
 	rows, err := globalDB.Query(context.Background(), `
 		SELECT a.id,
 		       COALESCE(a.owner_account_id, 0),
+		       COALESCE(ps.character_name, convert_from(e.encrypted_funcom_id, 'UTF8'), ''),
+		       COALESCE(ps.player_controller_id, 0),
 		       a.class,
 		       COALESCE(a.map, ''),
 		       COALESCE(pf.faction_id, 0)
 		FROM dune.actors a
+		LEFT JOIN dune.player_state ps ON ps.account_id = a.owner_account_id
+		LEFT JOIN dune.encrypted_accounts e ON e.id = a.owner_account_id
 		LEFT JOIN dune.player_faction pf ON pf.actor_id = a.id
 		WHERE a.class ILIKE '%PlayerCharacter%'
 		ORDER BY a.id`)
@@ -35,7 +39,7 @@ func cmdFetchPlayers() tea.Msg {
 	var players []playerInfo
 	for rows.Next() {
 		var p playerInfo
-		if err := rows.Scan(&p.ID, &p.AccountID, &p.Class, &p.Map, &p.FactionID); err != nil {
+		if err := rows.Scan(&p.ID, &p.AccountID, &p.Name, &p.ControllerID, &p.Class, &p.Map, &p.FactionID); err != nil {
 			continue
 		}
 		p.Class = shortClass(p.Class)
@@ -292,17 +296,17 @@ func cmdGiveItem(playerID int64, template string, qty, quality int64) tea.Cmd {
 				if vol.Valid && vol.Float64 > 0 {
 					itemVol = vol.Float64
 				} else if itemData.Items != nil {
-					if rule, ok := itemData.Items[tmpl]; ok && rule.Volume > 0 {
-						itemVol = rule.Volume
+					if rule, ok := itemData.Items[strings.ToLower(tmpl)]; ok {
+						itemVol = rule.Volume // 0 is valid — item takes no volume
 					} else if itemData.DefaultVolume > 0 {
 						itemVol = itemData.DefaultVolume
+					} else {
+						// Truly unknown — not in item-data and no volume_override.
+						missingVolumes[tmpl] = struct{}{}
+						continue
 					}
 				} else if itemData.DefaultVolume > 0 {
 					itemVol = itemData.DefaultVolume
-				}
-				if itemVol <= 0 {
-					missingVolumes[tmpl] = struct{}{}
-					continue
 				}
 				usedVolume += itemVol * float64(stackSize)
 			}
@@ -329,19 +333,19 @@ func cmdGiveItem(playerID int64, template string, qty, quality int64) tea.Cmd {
 			if err != nil {
 				return msgMutate{err: err}
 			}
-			if perItemVol <= 0 {
-				return msgMutate{err: fmt.Errorf("volume must be > 0 for %s", template)}
+			if perItemVol > 0 {
+				availableVol := maxVolume - usedVolume
+				if availableVol < 0 {
+					availableVol = 0
+				}
+				maxByVolume := int64(math.Floor(availableVol / perItemVol))
+				if maxByVolume < qty {
+					return msgMutate{err: fmt.Errorf(
+						"over weight limit: room for %d more %s (%.2f/%.2f volume used)",
+						maxByVolume, template, usedVolume, maxVolume)}
+				}
 			}
-			availableVol := maxVolume - usedVolume
-			if availableVol < 0 {
-				availableVol = 0
-			}
-			maxByVolume := int64(math.Floor(availableVol / perItemVol))
-			if maxByVolume < qty {
-				return msgMutate{err: fmt.Errorf(
-					"over weight limit: room for %d more %s (%.2f/%.2f volume used)",
-					maxByVolume, template, usedVolume, maxVolume)}
-			}
+			// perItemVol == 0: item takes no volume, always fits.
 		}
 
 		sort.Slice(stacks, func(i, j int) bool {
@@ -531,7 +535,7 @@ func resolveStackMax(ctx context.Context, template string, quality int64) (int64
 		return 1, nil
 	}
 	if itemData.Items != nil {
-		if rule, ok := itemData.Items[template]; ok && rule.StackMax > 0 {
+		if rule, ok := itemData.Items[strings.ToLower(template)]; ok && rule.StackMax > 0 {
 			return rule.StackMax, nil
 		}
 	}
@@ -554,7 +558,8 @@ func resolveStackMax(ctx context.Context, template string, quality int64) (int64
 
 func resolveItemVolume(ctx context.Context, template string) (float64, error) {
 	if itemData.Items != nil {
-		if rule, ok := itemData.Items[template]; ok && rule.Volume > 0 {
+		if rule, ok := itemData.Items[strings.ToLower(template)]; ok {
+			// volume=0 is valid (item takes no inventory space).
 			return rule.Volume, nil
 		}
 	}
@@ -732,6 +737,26 @@ func syncFactionTierTags(ctx context.Context, accountID int64, faction string, r
 				accountID, tag)
 		}
 	}
+}
+
+func cmdFetchItemTemplates() tea.Msg {
+	if globalDB == nil {
+		return msgItemTemplates{}
+	}
+	rows, err := globalDB.Query(context.Background(),
+		`SELECT DISTINCT template_id FROM dune.items ORDER BY template_id`)
+	if err != nil {
+		return msgItemTemplates{}
+	}
+	defer rows.Close()
+	var templates []string
+	for rows.Next() {
+		var t string
+		if rows.Scan(&t) == nil {
+			templates = append(templates, t)
+		}
+	}
+	return msgItemTemplates{templates: templates}
 }
 
 // ── database tab types and fetch functions ────────────────────────────────────

@@ -2,12 +2,26 @@ package main
 
 import (
 	"fmt"
+	"sort"
 	"strings"
 
 	"charm.land/bubbles/v2/table"
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 )
+
+// dbItemTemplates is the merged, sorted list of item templates from the DB +
+// item-data.json + dune-item-names.json. Populated after connect.
+var dbItemTemplates []string
+
+// duneItemNames is keyed by lowercase template ID; holds PascalCase ID and
+// English display name from dune-item-names.json.
+type duneItemName struct {
+	ID   string
+	Name string
+}
+
+var duneItemNames map[string]duneItemName
 
 // ── tab constants ─────────────────────────────────────────────────────────────
 
@@ -75,11 +89,13 @@ var (
 // ── domain types ─────────────────────────────────────────────────────────────
 
 type playerInfo struct {
-	ID        int64
-	AccountID int64
-	Class     string
-	Map       string
-	FactionID int16
+	ID           int64 // pawn actor (PlayerCharacter) — used for inventory, give-item, award-XP
+	AccountID    int64
+	ControllerID int64 // PlayerController actor — used for currency, faction rep, scrip
+	Name         string
+	Class        string
+	Map          string
+	FactionID    int16
 }
 
 type itemInfo struct {
@@ -112,8 +128,11 @@ type specTrack struct {
 }
 
 type itemRule struct {
+	Name     string  `json:"name"`
 	StackMax int64   `json:"stack_max"`
 	Volume   float64 `json:"volume"`
+	Tier     int     `json:"tier"`
+	Rarity   string  `json:"rarity"`
 }
 
 type itemDataFile struct {
@@ -161,6 +180,9 @@ type msgSQL struct {
 type msgMutate struct {
 	ok  string
 	err error
+}
+type msgItemTemplates struct {
+	templates []string
 }
 
 // ── model ─────────────────────────────────────────────────────────────────────
@@ -219,7 +241,35 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.statusMsg = "Connected → " + sshHost
 			m.statusIsOK = true
 			m.activeTab = tabPlayers
+			return m, tea.Batch(tea.Cmd(cmdFetchPlayers), tea.Cmd(cmdFetchItemTemplates))
 		}
+		return m, nil
+
+	case msgItemTemplates:
+		// Merge (in priority order): DB templates → duneItemNames → itemData keys.
+		// DB and duneItemNames supply correct PascalCase; itemData fills gaps.
+		seen := make(map[string]string) // lowercase → preferred-case template ID
+		for _, t := range msg.templates {
+			seen[strings.ToLower(t)] = t
+		}
+		for k, v := range duneItemNames {
+			if _, ok := seen[k]; !ok {
+				seen[k] = v.ID
+			}
+		}
+		if itemData.Items != nil {
+			for k := range itemData.Items {
+				if _, ok := seen[k]; !ok {
+					seen[k] = k
+				}
+			}
+		}
+		merged := make([]string, 0, len(seen))
+		for _, v := range seen {
+			merged = append(merged, v)
+		}
+		sort.Strings(merged)
+		dbItemTemplates = merged
 		return m, nil
 
 	case tea.KeyPressMsg:
@@ -241,6 +291,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, nil
 			case "4":
 				m.activeTab = tabLogs
+				if len(m.lg.pods) == 0 && !m.lg.loadingPods {
+					m.lg.loadingPods = true
+					return m, tea.Cmd(cmdFetchLogPods)
+				}
 				return m, nil
 			}
 		}
