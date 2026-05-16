@@ -14,10 +14,8 @@ import (
 )
 
 const (
-	exchangeID      = int64(2)         // HarkoVillage_EX (confirmed from player orders)
-	accessPointID   = int64(1)         // HarkoVillage_AP
-	listingsPerItem = 5                // separate sell orders per item
-	orderExpirySecs = int64(24 * 3600) // 24h in game seconds
+	listingsPerItem = 5
+	orderExpirySecs = int64(24 * 3600)
 )
 
 type categoryEntry struct {
@@ -38,6 +36,8 @@ type Exchange struct {
 	segIdx        [4][]string
 	botInvID      int64
 	ownerID       int64 // actor ID of the market bot (Revy)
+	exchangeID    int64
+	accessPointID int64
 	prices        map[string]int64
 	categories    map[string]categoryEntry
 	gameEpochUnix int64 // unix timestamp of the game server's time epoch; 0 = unknown
@@ -110,7 +110,22 @@ func (e *Exchange) gameNow() int64 {
 
 func (e *Exchange) Init(ctx context.Context, catalog []CatalogItem) error {
 	if err := e.db.QueryRow(ctx,
-		`SELECT dune.get_exchange_inventory_id($1)`, exchangeID).Scan(&e.botInvID); err != nil {
+		`SELECT id FROM dune.dune_exchanges WHERE exchange_name = 'HarkoVillage_EX' LIMIT 1`).Scan(&e.exchangeID); err != nil {
+		return fmt.Errorf("find HarkoVillage_EX exchange: %w", err)
+	}
+	log.Printf("exchange id: %d (HarkoVillage_EX)", e.exchangeID)
+
+	if err := e.db.QueryRow(ctx,
+		`SELECT DISTINCT access_point_id FROM dune.dune_exchange_orders WHERE exchange_id = $1 LIMIT 1`,
+		e.exchangeID).Scan(&e.accessPointID); err != nil {
+		e.accessPointID = 1
+		log.Printf("access point: no existing orders, defaulting to 1")
+	} else {
+		log.Printf("access point id: %d", e.accessPointID)
+	}
+
+	if err := e.db.QueryRow(ctx,
+		`SELECT dune.get_exchange_inventory_id($1)`, e.exchangeID).Scan(&e.botInvID); err != nil {
 		return fmt.Errorf("exchange inventory: %w", err)
 	}
 	log.Printf("exchange inventory id: %d", e.botInvID)
@@ -281,7 +296,7 @@ func (e *Exchange) createListing(ctx context.Context, item CatalogItem, price, s
 		   template_id, durability_cur, durability_max, category_mask, category_depth,
 		   item_price, quality_level, item_id)
 		VALUES ($1,$2,$3,TRUE,$4,$5,$6,$7,$8,$9,$10,$11,$12) RETURNING id`,
-		exchangeID, accessPointID, e.ownerID, expiry,
+		e.exchangeID, e.accessPointID, e.ownerID, expiry,
 		item.TemplateID, float32(1.0), float32(1.0),
 		catMask, catDepth, price, qualityLevel, itemID).Scan(&orderID); err != nil {
 		return fmt.Errorf("insert order: %w", err)
