@@ -181,11 +181,31 @@ On a fresh VM the k3s Deployment and namespace do not yet exist. `deploy.sh` cre
 
 ## Configuration
 
-All configuration is in `k8s/market-bot.yaml` (ConfigMap + Secret). Key values:
+All configuration is in `k8s/market-bot.yaml` (ConfigMap + Secret). **Edit this file before your first deploy.**
+
+### Required: set DB_HOST
+
+`DB_HOST` is the only value that differs between deployments. It is the in-cluster DNS name of the PostgreSQL service, which is unique to each Dune server instance.
+
+**Find the correct value by SSH-ing into the VM and running:**
+
+```bash
+sudo kubectl get svc -A | grep -i db
+```
+
+Look for the service in the `funcom-seabass-*` namespace. The full DNS name to use is:
+
+```
+<service-name>.<namespace>.svc.cluster.local
+```
+
+Then open `k8s/market-bot.yaml` locally and set `DB_HOST` in the ConfigMap to that value before running the deploy script.
+
+### All settings
 
 | Setting | Default | Where |
 |---------|---------|-------|
-| DB host | *(cluster DNS name)* | ConfigMap `DB_HOST` |
+| **DB host** | *(your cluster's DNS name — must be changed)* | ConfigMap `DB_HOST` |
 | DB port | `15432` | ConfigMap `DB_PORT` |
 | DB user | `dune` | ConfigMap `DB_USER` |
 | DB password | `dune` | Secret `DB_PASS` |
@@ -194,8 +214,6 @@ All configuration is in `k8s/market-bot.yaml` (ConfigMap + Secret). Key values:
 | Item data path | `/data/item-data.json` | ConfigMap `ITEM_DATA_PATH` |
 | Names path | `/data/dune-item-names.json` | ConfigMap `ITEM_NAMES_PATH` |
 | Cache DB path | `/cache/market-bot-cache.db` | ConfigMap `CACHE_DB_PATH` |
-
-The DB host must be the in-cluster DNS name of the PostgreSQL service in the `funcom-seabass-*` namespace. This is set correctly in the committed manifest for the default TrueNAS Dune server setup.
 
 ---
 
