@@ -277,15 +277,21 @@ func (e *Exchange) categoryFor(item CatalogItem) (mask int32, depth int16) {
 	return 0, 0
 }
 
-func (e *Exchange) buyPlayerListings(ctx context.Context) {
+func (e *Exchange) buyPlayerListings(ctx context.Context, orderExpiry int64) {
 	if e.buyThreshold <= 0 {
 		return
 	}
+	if orderExpiry <= 0 {
+		orderExpiry = 999_999_999
+	}
 
+	// Use actual current stack_size from items so partial fills pay the right amount.
 	rows, err := e.db.Query(ctx, `
-		SELECT o.id, o.template_id, o.item_price, o.item_id, o.owner_id, s.initial_stack_size
+		SELECT o.id, o.template_id, o.item_price, o.item_id, o.owner_id,
+		       COALESCE(i.stack_size, s.initial_stack_size) AS actual_stack
 		FROM dune.dune_exchange_orders o
 		JOIN dune.dune_exchange_sell_orders s ON s.order_id = o.id
+		LEFT JOIN dune.items i ON i.id = o.item_id
 		WHERE o.is_npc_order = FALSE AND o.exchange_id = $1
 		LIMIT $2`, e.exchangeID, e.maxBuys*10)
 	if err != nil {
@@ -320,30 +326,45 @@ func (e *Exchange) buyPlayerListings(ctx context.Context) {
 
 		totalCost := price * stackSize
 
-		// Direct purchase: credit seller, debit bot, delete listing + item.
-		// This avoids the dune_exchange_fulfilled_sell_order procedure which
-		// creates exchange-storage records the client misinterprets as expired orders.
 		tx, err := e.db.Begin(ctx)
 		if err != nil {
 			errs++
 			continue
 		}
+
+		// Create a payment log entry for the seller (item_id omitted → NULL).
+		// completion_type=4 + item_id=NULL is what the game engine uses for the
+		// seller side of a fulfilled sale, causing the client to show "Take Solari"
+		// in the Completed tab and fire the "X SOLARIS CLAIMED" toast on collection.
+		var logOrderID int64
+		if err := tx.QueryRow(ctx, `
+			INSERT INTO dune.dune_exchange_orders
+			  (exchange_id, access_point_id, owner_id, template_id, expiration_time,
+			   durability_cur, durability_max, item_price, category_mask, category_depth, is_npc_order)
+			VALUES ($1,$2,$3,$4,$5,1.0,1.0,$6,0,0,FALSE) RETURNING id`,
+			e.exchangeID, e.accessPointID, sellerActorID, tmpl, orderExpiry, price,
+		).Scan(&logOrderID); err != nil {
+			log.Printf("buy: log order for %s: %v", tmpl, err)
+			tx.Rollback(ctx)
+			errs++
+			continue
+		}
+
 		ok := true
 		for _, q := range []struct {
 			sql  string
 			args []any
 		}{
-			// Credit seller's wallet (player_virtual_currency_balances).
-			// player_controller_id == actor id for player characters.
-			{`UPDATE dune.player_virtual_currency_balances
-			    SET balance = balance + $1
-			    WHERE player_controller_id = $2
-			    AND currency_id = dune.get_solaris_id()`, []any{totalCost, sellerActorID}},
-			// Debit bot's exchange balance.
+			// Fulfilled-order record: source_order_id=NULL (original listing will be
+			// deleted), original_order_id kept for telemetry linkage (no FK constraint).
+			{`INSERT INTO dune.dune_exchange_fulfilled_orders
+			    (order_id, source_order_id, completion_type, stack_size, original_order_id)
+			    VALUES ($1, NULL, 4, $2, $3)`, []any{logOrderID, stackSize, orderID}},
+			// Debit bot's exchange balance for the purchase.
 			{`UPDATE dune.dune_exchange_users
 			    SET solari_balance = solari_balance - $1
 			    WHERE owner_id = $2`, []any{totalCost, e.ownerID}},
-			// Remove the active sell order and its item.
+			// Remove the original sell listing.
 			{`DELETE FROM dune.dune_exchange_sell_orders WHERE order_id = $1`, []any{orderID}},
 			{`DELETE FROM dune.dune_exchange_orders WHERE id = $1`, []any{orderID}},
 		} {
@@ -468,7 +489,7 @@ func (e *Exchange) Tick(ctx context.Context, catalog []CatalogItem) {
 		orderExpiry = 999_999_999
 	}
 
-	e.buyPlayerListings(ctx)
+	e.buyPlayerListings(ctx, orderExpiry)
 
 	// Load all current bot listings.
 	rows, err := e.db.Query(ctx, `
