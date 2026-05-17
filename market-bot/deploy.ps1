@@ -19,17 +19,47 @@
     $env:DUNE_VM_IP = "172.28.144.1"; .\deploy.ps1
 #>
 param(
-    [string]$VmIp = $(if ($env:DUNE_VM_IP) { $env:DUNE_VM_IP } else { "192.168.0.72" })
+    [string]$VmIp = ""
 )
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
-$ScriptDir  = $PSScriptRoot
-$SshKey     = Join-Path $ScriptDir "..\sshKey"
-$VmUser     = "dune"
-$RemoteDir  = "/opt/market-bot"
-$DataDir    = Join-Path $ScriptDir "..\dune-admin"
+$ScriptDir    = $PSScriptRoot
+$SshKey       = Join-Path $ScriptDir "..\sshKey"
+$VmUser       = "dune"
+$RemoteDir    = "/opt/market-bot"
+$DataDir      = Join-Path $ScriptDir "..\dune-admin"
+$DeployConfig = Join-Path $ScriptDir ".deploy-config"
+
+# ── Resolve VM IP (param → env → cache → Hyper-V → prompt) ───────────────────
+if (-not $VmIp) { $VmIp = $env:DUNE_VM_IP }
+if (-not $VmIp -and (Test-Path $DeployConfig)) {
+    $cached = Get-Content $DeployConfig | Where-Object { $_ -match '^DUNE_VM_IP=' } | Select-Object -First 1
+    if ($cached) { $VmIp = $cached.Split('=', 2)[1].Trim() }
+}
+if (-not $VmIp) {
+    try {
+        $hvIp = Get-VM | Get-VMNetworkAdapter | Where-Object { $_.IPAddresses } |
+                Select-Object -ExpandProperty IPAddresses |
+                Where-Object { $_ -match '^\d+\.\d+\.\d+\.\d+$' } |
+                Select-Object -First 1
+        if ($hvIp) {
+            $VmIp = $hvIp
+            Write-Host "    Hyper-V detected: $VmIp"
+        }
+    } catch {}
+}
+if (-not $VmIp) {
+    $VmIp = Read-Host "Enter VM IP address"
+    if (-not $VmIp) { throw "VM IP is required" }
+}
+# Cache whatever we resolved so future runs skip the detection.
+if (-not (Test-Path $DeployConfig) -or -not (Select-String -Path $DeployConfig -Pattern '^DUNE_VM_IP=' -Quiet)) {
+    Add-Content $DeployConfig "DUNE_VM_IP=${VmIp}"
+    Write-Host "    cached VM IP: $VmIp"
+}
+Write-Host "==> Deploying to $VmIp..." -ForegroundColor Cyan
 
 function Invoke-Ssh {
     param([string[]]$Command)
@@ -64,7 +94,6 @@ Write-Host "==> Preparing remote directories..." -ForegroundColor Cyan
 Invoke-Ssh "sudo mkdir -p ${RemoteDir}/{data,cache,bin} && sudo chown -R ${VmUser}:${VmUser} ${RemoteDir}"
 
 # ── 2a. Detect or load cached DB host ─────────────────────────────────────────
-$DeployConfig = Join-Path $ScriptDir ".deploy-config"
 $DetectedDbHost = ""
 
 Write-Host "==> Detecting DB host from cluster..." -ForegroundColor Cyan
@@ -83,7 +112,7 @@ if (-not $DetectedDbHost) {
             $parts = ($svcLine -split '\s+', 3)
             $svcNs = $parts[0]; $svcName = $parts[1]
             $DetectedDbHost = "${svcName}.${svcNs}.svc.cluster.local"
-            "DUNE_DB_HOST=${DetectedDbHost}" | Set-Content $DeployConfig
+            Add-Content $DeployConfig "DUNE_DB_HOST=${DetectedDbHost}"
             Write-Host "    detected and cached: $DetectedDbHost"
         } else {
             Write-Host "    warn: DB service not found, using value from k8s/market-bot.yaml"
@@ -91,6 +120,14 @@ if (-not $DetectedDbHost) {
     } catch {
         Write-Host "    warn: detection failed: $_" -ForegroundColor Yellow
     }
+}
+
+# Write detected host back to k8s/market-bot.yaml so the file stays in sync.
+if ($DetectedDbHost) {
+    $yamlPath = Join-Path $ScriptDir "k8s\market-bot.yaml"
+    $yaml = Get-Content $yamlPath -Raw
+    $yaml = $yaml -replace '(?m)^(\s*DB_HOST:\s*).*$', "`${1}${DetectedDbHost}"
+    $yaml | Set-Content $yamlPath -NoNewline
 }
 
 # ── 2b. Drop existing bot orders ─────────────────────────────────────────────
