@@ -5,6 +5,7 @@ RAW_PATH="${1:-item-data-raw.json}"
 OUT_PATH="${2:-item-data.json}"
 NAMES_PATH="${3:-dune-item-names.json}"
 SCHEMATICS_PATH="${4:-../systems/Items/BaseItems/DT_BaseItems_Schematics.json}"
+RECIPES_PATH="${5:-../systems/Crafting/DT_ItemsCraftingRecipes.json}"
 
 if ! command -v jq >/dev/null 2>&1; then
   echo "jq is required" >&2
@@ -160,3 +161,53 @@ TMP=$(mktemp)
 jq --argjson s "$SCHEMATICS_JSON" '.items = (.items + $s)' "$OUT_PATH" > "$TMP"
 mv "$TMP" "$OUT_PATH"
 echo "Merged $COUNT schematics into $OUT_PATH"
+
+# --- Step 3: material costs from crafting recipes ---
+
+if [ ! -f "$RECIPES_PATH" ]; then
+  echo "Recipes file not found ($RECIPES_PATH), skipping material cost computation."
+  exit 0
+fi
+
+MATERIAL_COST_JQ='
+  # $recipes is DT_ItemsCraftingRecipes.json (already parsed, array with Rows dict).
+  # For each recipe: use the LAST IngredientsPerQuality tier (highest grade = highest cost).
+  # Compute material_cost = sum of (vendor_price * quantity) for each ingredient.
+  # Merge into .items[output_item].material_cost.
+
+  . as $items |
+  (
+    $recipes[0][0].Rows | to_entries | map(
+      .value.Recipe as $r |
+      ($r.Outcome // [])[0].Key.Name as $out |
+      select($out != null and $out != "") |
+      (($r.IngredientsPerQuality // [{}])[-1:][0].Ingredients // []) as $ings |
+      {
+        key: $out,
+        value: (
+          $ings | map(
+            (.Key.Name as $n |
+             ($items.items[$n].vendor_price // 0) * .Value.Amount)
+          ) | add // 0
+        )
+      }
+    ) | from_entries
+  ) as $costs |
+  .items |= with_entries(
+    if $costs[.key] != null and $costs[.key] > 0
+    then .value.material_cost = $costs[.key]
+    else .
+    end
+  )
+'
+
+echo "Computing material costs from $RECIPES_PATH..."
+RECIPES_STRIPPED=$(mktemp)
+sed 's/^\xef\xbb\xbf//' "$RECIPES_PATH" > "$RECIPES_STRIPPED"
+TMP=$(mktemp)
+jq --slurpfile recipes "$RECIPES_STRIPPED" "$MATERIAL_COST_JQ" "$OUT_PATH" > "$TMP"
+mv "$TMP" "$OUT_PATH"
+rm "$RECIPES_STRIPPED"
+
+COST_COUNT=$(jq '[.items | to_entries[] | select(.value.material_cost != null)] | length' "$OUT_PATH")
+echo "Added material_cost to $COST_COUNT items in $OUT_PATH"

@@ -63,6 +63,23 @@ try {
 Write-Host "==> Preparing remote directories..." -ForegroundColor Cyan
 Invoke-Ssh "sudo mkdir -p ${RemoteDir}/{data,cache,bin} && sudo chown -R ${VmUser}:${VmUser} ${RemoteDir}"
 
+# ── 2b. Drop existing bot orders ─────────────────────────────────────────────
+Write-Host "==> Dropping existing bot orders..." -ForegroundColor Cyan
+try {
+    $dbInfo = & ssh -o StrictHostKeyChecking=no -i $SshKey "${VmUser}@${VmIp}" "sudo kubectl get pods -A --no-headers | grep 'db-dbdepl-sts-0'" 2>$null
+    if ($dbInfo) {
+        $parts  = ($dbInfo -split '\s+', 3)
+        $dbNs   = $parts[0]; $dbPod = $parts[1]
+        $sql    = "DELETE FROM dune.items WHERE id IN (SELECT item_id FROM dune.dune_exchange_orders WHERE owner_id = 158 AND is_npc_order = TRUE AND item_id IS NOT NULL); DELETE FROM dune.dune_exchange_orders WHERE owner_id = 158 AND is_npc_order = TRUE;"
+        Invoke-Ssh "sudo kubectl exec -n $dbNs $dbPod -- psql -U dune -h localhost -p 15432 -d dune -c '$sql'"
+        Write-Host "    done."
+    } else {
+        Write-Host "    warn: DB pod not found, skipping order cleanup."
+    }
+} catch {
+    Write-Host "    warn: order cleanup failed: $_" -ForegroundColor Yellow
+}
+
 # ── 3. Upload binary ──────────────────────────────────────────────────────────
 Write-Host "==> Uploading binary..." -ForegroundColor Cyan
 Invoke-Scp (Join-Path $ScriptDir "market-bot-linux") "${VmUser}@${VmIp}:/tmp/market-bot-new"

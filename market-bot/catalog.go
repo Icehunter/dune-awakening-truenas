@@ -8,16 +8,17 @@ import (
 )
 
 type CatalogItem struct {
-	TemplateID  string
-	DisplayName string
-	StackMax    int64
-	Volume      float64
-	Tier        int
-	Rarity      string
-	BasePrice   int64
-	Category    string // e.g. "items/misc/refinedresources"
-	ListPrice   int64
-	IsSchematic bool
+	TemplateID   string
+	DisplayName  string
+	StackMax     int64
+	Volume       float64
+	Tier         int
+	Rarity       string
+	BasePrice    int64
+	Category     string // e.g. "items/misc/refinedresources"
+	ListPrice    int64
+	IsSchematic  bool
+	MaterialCost int64
 }
 
 type itemNameEntry struct {
@@ -28,15 +29,16 @@ type itemNameEntry struct {
 }
 
 type itemDataEntry struct {
-	Name        string  `json:"name"`
-	StackMax    int64   `json:"stack_max"`
-	Volume      float64 `json:"volume"`
-	Tier        int     `json:"tier"`
-	Rarity      string  `json:"rarity"`
-	BasePrice   int64   `json:"vendor_price"`
-	Category    string  `json:"category"`
-	Tradeable   *bool   `json:"tradeable"`
-	IsSchematic bool    `json:"is_schematic"`
+	Name         string  `json:"name"`
+	StackMax     int64   `json:"stack_max"`
+	Volume       float64 `json:"volume"`
+	Tier         int     `json:"tier"`
+	Rarity       string  `json:"rarity"`
+	BasePrice    int64   `json:"vendor_price"`
+	Category     string  `json:"category"`
+	Tradeable    *bool   `json:"tradeable"`
+	IsSchematic  bool    `json:"is_schematic"`
+	MaterialCost int64   `json:"material_cost"`
 }
 
 type itemDataFile struct {
@@ -104,6 +106,7 @@ func loadCatalog() ([]CatalogItem, error) {
 			item.BasePrice = d.BasePrice
 			item.Category = d.Category
 			item.IsSchematic = d.IsSchematic
+			item.MaterialCost = d.MaterialCost
 			if item.DisplayName == "" {
 				item.DisplayName = d.Name
 			}
@@ -124,15 +127,16 @@ func loadCatalog() ([]CatalogItem, error) {
 			continue
 		}
 		item := CatalogItem{
-			TemplateID:  id,
-			DisplayName: d.Name,
-			StackMax:    d.StackMax,
-			Volume:      d.Volume,
-			Tier:        d.Tier,
-			Rarity:      d.Rarity,
-			BasePrice:   d.BasePrice,
-			Category:    d.Category,
-			IsSchematic: true,
+			TemplateID:   id,
+			DisplayName:  d.Name,
+			StackMax:     d.StackMax,
+			Volume:       d.Volume,
+			Tier:         d.Tier,
+			Rarity:       d.Rarity,
+			BasePrice:    d.BasePrice,
+			Category:     d.Category,
+			IsSchematic:  true,
+			MaterialCost: d.MaterialCost,
 		}
 		item.ListPrice = computePrice(item)
 		catalog = append(catalog, item)

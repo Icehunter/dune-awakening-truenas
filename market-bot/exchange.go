@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"fmt"
 	"log"
+	"math/rand"
 	"strings"
 	"time"
 
@@ -28,6 +29,7 @@ type listingInfo struct {
 	itemID    int64
 	stackSize int64
 	price     int64
+	grade     int64
 }
 
 type Exchange struct {
@@ -375,6 +377,38 @@ func (e *Exchange) buyPlayerListings(ctx context.Context) {
 	}
 }
 
+// gradeWeights maps rarity (lowercase) to per-grade weights for grades 1–5.
+// Unique/memento items lean toward higher grades; common items lean lower.
+var gradeWeights = map[string][]int{
+	"unique":  {5, 10, 20, 30, 35},
+	"memento": {5, 10, 20, 30, 35},
+	"":        {35, 30, 20, 10, 5}, // common / unset
+}
+
+// gradeForItem picks a random quality_level (1–5) weighted by rarity.
+// Stackable materials and schematics return 0 (no grade).
+func gradeForItem(item CatalogItem) int64 {
+	if item.StackMax > 1 || item.IsSchematic {
+		return 0
+	}
+	weights, ok := gradeWeights[strings.ToLower(item.Rarity)]
+	if !ok {
+		weights = gradeWeights[""]
+	}
+	total := 0
+	for _, w := range weights {
+		total += w
+	}
+	r := rand.Intn(total)
+	for i, w := range weights {
+		r -= w
+		if r < 0 {
+			return int64(i + 1)
+		}
+	}
+	return 5
+}
+
 // createListing inserts one sell order + its item directly into the DB.
 func (e *Exchange) createListing(ctx context.Context, item CatalogItem, price, stackMax, expiry int64) error {
 	catMask, catDepth := e.categoryFor(item)
@@ -385,13 +419,8 @@ func (e *Exchange) createListing(ctx context.Context, item CatalogItem, price, s
 	}
 	defer tx.Rollback(ctx)
 
-	// Unique and Memento rarity items use quality_level=255 so they appear in
-	// the correct quality tier filter in the game's market UI.
-	qualityLevel := int64(0)
-	switch strings.ToLower(item.Rarity) {
-	case "unique", "memento":
-		qualityLevel = 255
-	}
+	qualityLevel := gradeForItem(item)
+	listPrice := gradedPrice(price, qualityLevel) // grade-adjusted; grade 0 returns base price unchanged
 
 	// Item goes directly into the exchange inventory.
 	var itemID int64
@@ -412,14 +441,14 @@ func (e *Exchange) createListing(ctx context.Context, item CatalogItem, price, s
 		VALUES ($1,$2,$3,TRUE,$4,$5,$6,$7,$8,$9,$10,$11,$12) RETURNING id`,
 		e.exchangeID, e.accessPointID, e.ownerID, expiry,
 		item.TemplateID, float32(1.0), float32(1.0),
-		catMask, catDepth, price, qualityLevel, itemID).Scan(&orderID); err != nil {
+		catMask, catDepth, listPrice, qualityLevel, itemID).Scan(&orderID); err != nil {
 		return fmt.Errorf("insert order: %w", err)
 	}
 
 	if _, err := tx.Exec(ctx, `
 		INSERT INTO dune.dune_exchange_sell_orders (order_id, initial_stack_size, wear_normalized_price)
 		VALUES ($1, $2, $3)`,
-		orderID, stackMax, price); err != nil {
+		orderID, stackMax, listPrice); err != nil {
 		return fmt.Errorf("insert sell order: %w", err)
 	}
 
@@ -443,7 +472,7 @@ func (e *Exchange) Tick(ctx context.Context, catalog []CatalogItem) {
 
 	// Load all current bot listings.
 	rows, err := e.db.Query(ctx, `
-		SELECT o.id, o.template_id, o.item_id, o.item_price, i.stack_size
+		SELECT o.id, o.template_id, o.item_id, o.item_price, i.stack_size, o.quality_level
 		FROM dune.dune_exchange_orders o
 		JOIN dune.items i ON i.id = o.item_id
 		WHERE o.owner_id = $1 AND o.is_npc_order = TRUE`, e.ownerID)
@@ -453,12 +482,12 @@ func (e *Exchange) Tick(ctx context.Context, catalog []CatalogItem) {
 	}
 	current := make(map[string][]listingInfo)
 	for rows.Next() {
-		var orderID, itemID, price, stack int64
+		var orderID, itemID, price, stack, grade int64
 		var tmpl string
-		if err := rows.Scan(&orderID, &tmpl, &itemID, &price, &stack); err != nil {
+		if err := rows.Scan(&orderID, &tmpl, &itemID, &price, &stack, &grade); err != nil {
 			continue
 		}
-		current[tmpl] = append(current[tmpl], listingInfo{orderID, itemID, stack, price})
+		current[tmpl] = append(current[tmpl], listingInfo{orderID, itemID, stack, price, grade})
 	}
 	rows.Close()
 
@@ -479,10 +508,11 @@ func (e *Exchange) Tick(ctx context.Context, catalog []CatalogItem) {
 
 		listings := current[item.TemplateID]
 
-		// Remove listings at stale prices.
+		// Remove listings at stale prices. Each listing's expected price is the
+		// base price scaled by its grade, so a base-price change reprices all grades.
 		var valid []listingInfo
 		for _, l := range listings {
-			if l.price != price {
+			if l.price != gradedPrice(price, l.grade) {
 				e.db.Exec(ctx, `DELETE FROM dune.dune_exchange_orders WHERE id = $1`, l.orderID)
 				e.db.Exec(ctx, `DELETE FROM dune.items WHERE id = $1`, l.itemID)
 				pruned++

@@ -320,6 +320,13 @@ const minMeaningfulVendorPrice = 10
 
 // basePrice returns the unrounded base price, shared by computePrice and adjustPrice.
 func basePrice(item CatalogItem) int64 {
+	// Unique/memento equipment with a known crafting cost: price as
+	// schematic_equivalent + material_cost * 0.75.
+	if item.MaterialCost > 0 && item.StackMax <= 1 && !item.IsSchematic &&
+		(strings.ToLower(item.Rarity) == "unique" || strings.ToLower(item.Rarity) == "memento") {
+		schemPrice := float64(schematicEquipmentPrice(item.Tier)) * rarityMult(item.Rarity)
+		return int64(math.Round(schemPrice + float64(item.MaterialCost)*0.75))
+	}
 	if item.BasePrice >= minMeaningfulVendorPrice {
 		mult := vendorMult(item.Rarity)
 		return int64(math.Round(float64(item.BasePrice) * mult))
@@ -327,7 +334,11 @@ func basePrice(item CatalogItem) int64 {
 	// Fallback for items without a vendor price.
 	mult := rarityMult(item.Rarity)
 	if item.StackMax <= 1 {
-		return int64(math.Round(float64(equipmentPrice(item.Tier)) * mult))
+		base := equipmentPrice(item.Tier)
+		if item.IsSchematic {
+			base = schematicEquipmentPrice(item.Tier)
+		}
+		return int64(math.Round(float64(base) * mult))
 	}
 	p := int64(math.Round(float64(materialUnitPrice(item.Tier)) * mult))
 	if p < 1 {
@@ -350,7 +361,7 @@ func vendorMult(rarity string) float64 {
 	}
 }
 
-// equipmentPrice is the per-item price for non-stackable gear (StackMax=1).
+// equipmentPrice is the per-item price for non-stackable physical gear (StackMax=1).
 func equipmentPrice(tier int) int64 {
 	switch tier {
 	case 1:
@@ -366,6 +377,28 @@ func equipmentPrice(tier int) int64 {
 	case 6:
 		return 750_000
 	default: // T0 social/cosmetic gear
+		return 500
+	}
+}
+
+// schematicEquipmentPrice is the base listing price for a unique schematic.
+// Calibrated to be competitive with (but below) Landsraad vendor prices which
+// range from ~42,500–215,000 for T6 unique schematics.
+func schematicEquipmentPrice(tier int) int64 {
+	switch tier {
+	case 1:
+		return 500
+	case 2:
+		return 1_500
+	case 3:
+		return 4_000
+	case 4:
+		return 12_000
+	case 5:
+		return 30_000
+	case 6:
+		return 75_000
+	default:
 		return 500
 	}
 }
@@ -424,6 +457,23 @@ func adjustPrice(item CatalogItem, currentPrice int64, soldFraction float64) int
 		next = ceiling
 	}
 	return next
+}
+
+// gradePriceMult returns the price multiplier for quality grades 1–5.
+// Grade 0 (no grade — stackables, schematics) returns 1.0.
+// Calibrated against in-game stat scaling: G1=1.0× baseline, G5≈2.0× (empirical range 1.5–2.2×).
+var gradePriceMultTable = [6]float64{1.0, 1.0, 1.25, 1.5, 1.75, 2.0}
+
+func gradePriceMult(grade int64) float64 {
+	if grade < 0 || grade > 5 {
+		return 1.0
+	}
+	return gradePriceMultTable[grade]
+}
+
+// gradedPrice returns the grade-adjusted listing price, rounded to a clean step.
+func gradedPrice(basePrice int64, grade int64) int64 {
+	return roundPrice(int64(math.Round(float64(basePrice) * gradePriceMult(grade))))
 }
 
 // roundPrice rounds to a magnitude-appropriate step so prices look clean.
