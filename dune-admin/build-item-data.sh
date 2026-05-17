@@ -6,6 +6,7 @@ OUT_PATH="${2:-item-data.json}"
 NAMES_PATH="${3:-dune-item-names.json}"
 SCHEMATICS_PATH="${4:-../systems/Items/BaseItems/DT_BaseItems_Schematics.json}"
 RECIPES_PATH="${5:-../systems/Crafting/DT_ItemsCraftingRecipes.json}"
+CDT_BASE_PATH="${6:-../systems/Items/CDT_BaseItems.json}"
 
 if ! command -v jq >/dev/null 2>&1; then
   echo "jq is required" >&2
@@ -211,3 +212,50 @@ rm "$RECIPES_STRIPPED"
 
 COST_COUNT=$(jq '[.items | to_entries[] | select(.value.material_cost != null)] | length' "$OUT_PATH")
 echo "Added material_cost to $COST_COUNT items in $OUT_PATH"
+
+# --- Step 4: is_gradeable from CDT_BaseItems item tags ---
+
+if [ ! -f "$CDT_BASE_PATH" ]; then
+  echo "CDT_BaseItems not found ($CDT_BASE_PATH), skipping is_gradeable computation."
+  exit 0
+fi
+
+echo "Computing is_gradeable from $CDT_BASE_PATH..."
+python3 - << PYEOF
+import json, sys
+
+CDT_PATH = "$CDT_BASE_PATH"
+OUT = "$OUT_PATH"
+
+with open(CDT_PATH, 'rb') as f:
+    cdt = json.loads(f.read().decode('utf-8-sig'))
+rows = cdt[0]['Rows']
+
+EXCLUDED_TAGS = {'Items.CraftedResources', 'Items.RawResources',
+                 'Items.RefinedResources', 'Items.Schematics'}
+
+gradeable_map = {}
+for item_id, entry in rows.items():
+    tags = set(entry.get('StaticData', {}).get('ItemTags', []) or [])
+    # Gradeable = can drop from loot pools with quality grades.
+    # Proxy: has any LootTier.* tag (present on all loot-eligible equipment).
+    # Items without this tag are crafted-only or story-progression items (grade 0 only).
+    has_loot_tier = any(t.startswith('LootTier.') for t in tags)
+    excluded = bool(tags & EXCLUDED_TAGS)
+    gradeable_map[item_id] = has_loot_tier and not excluded
+
+with open(OUT) as f:
+    data = json.load(f)
+
+count = 0
+for key in data['items']:
+    val = gradeable_map.get(key, False)
+    data['items'][key]['is_gradeable'] = val
+    if val:
+        count += 1
+
+with open(OUT, 'w') as f:
+    json.dump(data, f, separators=(',', ':'))
+
+print(f"Marked {count} items as gradeable in {OUT}")
+PYEOF

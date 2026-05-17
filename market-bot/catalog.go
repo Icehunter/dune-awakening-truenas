@@ -19,6 +19,7 @@ type CatalogItem struct {
 	ListPrice    int64
 	IsSchematic  bool
 	MaterialCost int64
+	IsGradeable  bool
 }
 
 type itemNameEntry struct {
@@ -39,6 +40,7 @@ type itemDataEntry struct {
 	Tradeable    *bool   `json:"tradeable"`
 	IsSchematic  bool    `json:"is_schematic"`
 	MaterialCost int64   `json:"material_cost"`
+	IsGradeable  bool    `json:"is_gradeable"`
 }
 
 type itemDataFile struct {
@@ -107,6 +109,7 @@ func loadCatalog() ([]CatalogItem, error) {
 			item.Category = d.Category
 			item.IsSchematic = d.IsSchematic
 			item.MaterialCost = d.MaterialCost
+			item.IsGradeable = d.IsGradeable
 			if item.DisplayName == "" {
 				item.DisplayName = d.Name
 			}

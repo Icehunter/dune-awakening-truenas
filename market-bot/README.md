@@ -1,19 +1,25 @@
 # market-bot
 
-An automated market bot for the Dune Awakening private server exchange. It runs as a k3s Deployment on the TrueNAS VM and continuously maintains sell listings for every tradeable item in the game — 5 listings per item at full stack size, repriced dynamically based on sales velocity.
+An automated market bot for the Dune Awakening private server exchange. It runs as a k3s Deployment on the TrueNAS VM and continuously maintains sell listings for every tradeable item in the game, repriced dynamically based on sales velocity.
 
 ## How it works
 
 Every 5 minutes the bot:
 
 1. Loads the item catalog from `item-data.json` + `dune-item-names.json`
-2. Queries the exchange for its own existing listings (bot actor: **Revy**, actor ID 158)
+2. Queries the exchange for its own existing listings (bot actor: **Revy**, actor ID looked up dynamically)
 3. Removes listings whose price has drifted from the current target
 4. Tops up any partially-depleted stacks to full `stack_max`
-5. Creates new listings until each item has exactly 5 sell orders
+5. Creates **5 listings per quality grade** for each applicable item
 6. Refreshes all order expiry times to game-time + 24 h
 
 The bot only touches its own NPC orders — player listings are never modified.
+
+### Grade listings
+
+Items that can drop from overland testing stations (ecolabs) are listed at **each of grades 0–5**, for 30 listings per item. Grade eligibility is determined by the `is_gradeable` flag in `item-data.json`, which is computed from CDT_BaseItems item tags during the `build-item-data.sh` pipeline — any non-schematic, non-resource item with a `LootTier.*` tag is considered gradeable.
+
+Items without a `LootTier` tag (crafted-only, story-progression) are listed at **grade 0 only**, 5 listings. Schematics and stackable materials are always grade 0 only.
 
 ### Pricing
 
@@ -33,8 +39,9 @@ Prices adjust ±5–10 % per tick based on how much of each item sold. Floor = b
 |---------|-------|
 | Exchange | HarkoVillage\_EX (ID 2) |
 | Access point | HarkoVillage\_AP (ID 1) |
-| Bot character | Revy (class `Revy`, actor ID 158) |
-| Listings per item | 5 (each at full `stack_max`) |
+| Bot character | Revy (class `Revy`, actor ID **varies per server** — looked up dynamically via `SELECT id FROM dune.actors WHERE class = 'Revy'`) |
+| Listings per gradeable item | 5 per grade × 6 grades (0–5) = 30 total |
+| Listings per non-gradeable item | 5 (grade 0 only) |
 | Order expiry | 24 h (game time) |
 
 ---
@@ -243,20 +250,25 @@ market-bot tick: 4875 created, 0 topped up, 0 pruned, 0 errors
 To remove all bot listings from the database (e.g. before a redeploy with new prices):
 
 ```sql
-WITH del_so AS (
+WITH bot AS (
+  SELECT id FROM dune.actors WHERE class = 'Revy' LIMIT 1
+),
+del_so AS (
   DELETE FROM dune.dune_exchange_sell_orders
   WHERE order_id IN (
     SELECT id FROM dune.dune_exchange_orders
-    WHERE owner_id = 158 AND is_npc_order = TRUE
+    WHERE owner_id = (SELECT id FROM bot) AND is_npc_order = TRUE
   )
 ),
 del_o AS (
   DELETE FROM dune.dune_exchange_orders
-  WHERE owner_id = 158 AND is_npc_order = TRUE
+  WHERE owner_id = (SELECT id FROM bot) AND is_npc_order = TRUE
   RETURNING item_id
 )
 DELETE FROM dune.items WHERE id IN (SELECT item_id FROM del_o);
 ```
+
+> **Note:** The bot's actor ID is assigned dynamically and **varies per server instance** — never hardcode it. The query above looks it up by the `Revy` class name, which is always correct.
 
 Run this from the **dune-admin** Database tab or any PostgreSQL client with access to the cluster.
 

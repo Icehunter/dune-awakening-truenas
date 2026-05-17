@@ -5,7 +5,6 @@ import (
 	"database/sql"
 	"fmt"
 	"log"
-	"math/rand"
 	"strings"
 	"time"
 
@@ -15,9 +14,25 @@ import (
 )
 
 const (
-	listingsPerItem = 5
-	orderExpirySecs = int64(24 * 3600)
+	listingsPerGrade = 5
+	orderExpirySecs  = int64(24 * 3600)
 )
+
+// gradeKey groups listings by template + quality grade for per-grade quota tracking.
+type gradeKey struct {
+	tmpl  string
+	grade int64
+}
+
+// applicableGrades returns which quality levels to list an item at.
+// Gradeable equipment (drops from overland testing stations) gets grades 0–5.
+// Everything else (stackables, schematics, non-gradeable gear) gets grade 0 only.
+func applicableGrades(item CatalogItem) []int64 {
+	if item.StackMax > 1 || item.IsSchematic || !item.IsGradeable {
+		return []int64{0}
+	}
+	return []int64{0, 1, 2, 3, 4, 5}
+}
 
 type categoryEntry struct {
 	mask  int32
@@ -403,40 +418,8 @@ func (e *Exchange) buyPlayerListings(ctx context.Context, orderExpiry int64) {
 	}
 }
 
-// gradeWeights maps rarity (lowercase) to per-grade weights for grades 1–5.
-// Unique/memento items lean toward higher grades; common items lean lower.
-var gradeWeights = map[string][]int{
-	"unique":  {5, 10, 20, 30, 35},
-	"memento": {5, 10, 20, 30, 35},
-	"":        {35, 30, 20, 10, 5}, // common / unset
-}
-
-// gradeForItem picks a random quality_level (1–5) weighted by rarity.
-// Stackable materials and schematics return 0 (no grade).
-func gradeForItem(item CatalogItem) int64 {
-	if item.StackMax > 1 || item.IsSchematic {
-		return 0
-	}
-	weights, ok := gradeWeights[strings.ToLower(item.Rarity)]
-	if !ok {
-		weights = gradeWeights[""]
-	}
-	total := 0
-	for _, w := range weights {
-		total += w
-	}
-	r := rand.Intn(total)
-	for i, w := range weights {
-		r -= w
-		if r < 0 {
-			return int64(i + 1)
-		}
-	}
-	return 5
-}
-
-// createListing inserts one sell order + its item directly into the DB.
-func (e *Exchange) createListing(ctx context.Context, item CatalogItem, price, stackMax, expiry int64) error {
+// createListing inserts one sell order + its item directly into the DB at the given grade.
+func (e *Exchange) createListing(ctx context.Context, item CatalogItem, basePrice, stackMax, expiry, grade int64) error {
 	catMask, catDepth := e.categoryFor(item)
 
 	tx, err := e.db.Begin(ctx)
@@ -445,8 +428,8 @@ func (e *Exchange) createListing(ctx context.Context, item CatalogItem, price, s
 	}
 	defer tx.Rollback(ctx)
 
-	qualityLevel := gradeForItem(item)
-	listPrice := gradedPrice(price, qualityLevel) // grade-adjusted; grade 0 returns base price unchanged
+	qualityLevel := grade
+	listPrice := gradedPrice(basePrice, grade)
 
 	// Item goes directly into the exchange inventory.
 	var itemID int64
@@ -496,7 +479,7 @@ func (e *Exchange) Tick(ctx context.Context, catalog []CatalogItem) {
 
 	e.buyPlayerListings(ctx, orderExpiry)
 
-	// Load all current bot listings.
+	// Load all current bot listings grouped by (template, grade).
 	rows, err := e.db.Query(ctx, `
 		SELECT o.id, o.template_id, o.item_id, o.item_price, i.stack_size, o.quality_level
 		FROM dune.dune_exchange_orders o
@@ -506,14 +489,15 @@ func (e *Exchange) Tick(ctx context.Context, catalog []CatalogItem) {
 		log.Printf("load listings: %v", err)
 		return
 	}
-	current := make(map[string][]listingInfo)
+	current := make(map[gradeKey][]listingInfo)
 	for rows.Next() {
 		var orderID, itemID, price, stack, grade int64
 		var tmpl string
 		if err := rows.Scan(&orderID, &tmpl, &itemID, &price, &stack, &grade); err != nil {
 			continue
 		}
-		current[tmpl] = append(current[tmpl], listingInfo{orderID, itemID, stack, price, grade})
+		k := gradeKey{tmpl, grade}
+		current[k] = append(current[k], listingInfo{orderID, itemID, stack, price, grade})
 	}
 	rows.Close()
 
@@ -524,47 +508,50 @@ func (e *Exchange) Tick(ctx context.Context, catalog []CatalogItem) {
 		if stackMax <= 0 {
 			stackMax = 1
 		}
-		price := e.prices[item.TemplateID]
-		if price <= 0 {
-			price = item.ListPrice
+		basePrice := e.prices[item.TemplateID]
+		if basePrice <= 0 {
+			basePrice = item.ListPrice
 		}
-		if price <= 0 {
-			continue // item has no meaningful price, skip
+		if basePrice <= 0 {
+			continue
 		}
 
-		listings := current[item.TemplateID]
+		for _, grade := range applicableGrades(item) {
+			price := gradedPrice(basePrice, grade)
+			key := gradeKey{item.TemplateID, grade}
+			listings := current[key]
 
-		// Remove listings at stale prices. Each listing's expected price is the
-		// base price scaled by its grade, so a base-price change reprices all grades.
-		var valid []listingInfo
-		for _, l := range listings {
-			if l.price != gradedPrice(price, l.grade) {
-				e.db.Exec(ctx, `DELETE FROM dune.dune_exchange_orders WHERE id = $1`, l.orderID)
-				e.db.Exec(ctx, `DELETE FROM dune.items WHERE id = $1`, l.itemID)
-				pruned++
-			} else {
-				valid = append(valid, l)
+			// Remove listings where the grade-adjusted price is stale.
+			var valid []listingInfo
+			for _, l := range listings {
+				if l.price != price {
+					e.db.Exec(ctx, `DELETE FROM dune.dune_exchange_orders WHERE id = $1`, l.orderID)
+					e.db.Exec(ctx, `DELETE FROM dune.items WHERE id = $1`, l.itemID)
+					pruned++
+				} else {
+					valid = append(valid, l)
+				}
 			}
-		}
 
-		// Top up depleted listings and refresh expiry.
-		for _, l := range valid {
-			if l.stackSize < stackMax {
-				e.db.Exec(ctx, `UPDATE dune.items SET stack_size = $1 WHERE id = $2`, stackMax, l.itemID)
-				topped++
+			// Top up depleted stacks and refresh expiry on valid listings.
+			for _, l := range valid {
+				if l.stackSize < stackMax {
+					e.db.Exec(ctx, `UPDATE dune.items SET stack_size = $1 WHERE id = $2`, stackMax, l.itemID)
+					topped++
+				}
+				e.db.Exec(ctx,
+					`UPDATE dune.dune_exchange_orders SET expiration_time = $1 WHERE id = $2`,
+					orderExpiry, l.orderID)
 			}
-			e.db.Exec(ctx,
-				`UPDATE dune.dune_exchange_orders SET expiration_time = $1 WHERE id = $2`,
-				orderExpiry, l.orderID)
-		}
 
-		// Create new listings to reach listingsPerItem.
-		for i := len(valid); i < listingsPerItem; i++ {
-			if err := e.createListing(ctx, item, price, stackMax, orderExpiry); err != nil {
-				log.Printf("listing %s: %v", item.TemplateID, err)
-				errs++
-			} else {
-				created++
+			// Create listings to reach listingsPerGrade for this grade.
+			for i := len(valid); i < listingsPerGrade; i++ {
+				if err := e.createListing(ctx, item, basePrice, stackMax, orderExpiry, grade); err != nil {
+					log.Printf("listing %s grade %d: %v", item.TemplateID, grade, err)
+					errs++
+				} else {
+					created++
+				}
 			}
 		}
 	}
