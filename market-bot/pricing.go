@@ -348,7 +348,8 @@ func basePrice(item CatalogItem) int64 {
 }
 
 // vendorMult is the market price multiplier applied to the NPC vendor base price.
-// Common items at 2x: slightly above vendor "list" price.
+// BaseBuyFromVendorPrice is the NPC sell price; observed market prices run ~2.875×
+// that value across multiple item types, so 3.0 is used as the common multiplier.
 // Unique/Memento at higher multiples since they're rarer on the open market.
 func vendorMult(rarity string) float64 {
 	switch strings.ToLower(rarity) {
@@ -357,7 +358,7 @@ func vendorMult(rarity string) float64 {
 	case "memento":
 		return 5.0
 	default: // Common
-		return 2.0
+		return 3.0
 	}
 }
 

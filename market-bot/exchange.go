@@ -286,9 +286,12 @@ func (e *Exchange) buyPlayerListings(ctx context.Context, orderExpiry int64) {
 	}
 
 	// Use actual current stack_size from items so partial fills pay the right amount.
+	// quality_level is needed to compare the player's grade-adjusted price against the
+	// bot's grade-adjusted reference price rather than the raw base price.
 	rows, err := e.db.Query(ctx, `
 		SELECT o.id, o.template_id, o.item_price, o.item_id, o.owner_id,
-		       COALESCE(i.stack_size, s.initial_stack_size) AS actual_stack
+		       COALESCE(i.stack_size, s.initial_stack_size) AS actual_stack,
+		       COALESCE(o.quality_level, 0) AS quality_level
 		FROM dune.dune_exchange_orders o
 		JOIN dune.dune_exchange_sell_orders s ON s.order_id = o.id
 		LEFT JOIN dune.items i ON i.id = o.item_id
@@ -307,9 +310,9 @@ func (e *Exchange) buyPlayerListings(ctx context.Context, orderExpiry int64) {
 			break
 		}
 
-		var orderID, price, itemID, sellerActorID, stackSize int64
+		var orderID, price, itemID, sellerActorID, stackSize, grade int64
 		var tmpl string
-		if err := rows.Scan(&orderID, &tmpl, &price, &itemID, &sellerActorID, &stackSize); err != nil {
+		if err := rows.Scan(&orderID, &tmpl, &price, &itemID, &sellerActorID, &stackSize, &grade); err != nil {
 			errs++
 			continue
 		}
@@ -319,7 +322,9 @@ func (e *Exchange) buyPlayerListings(ctx context.Context, orderExpiry int64) {
 			skippedUnknown++
 			continue
 		}
-		if price > int64(float64(botPrice)*e.buyThreshold) {
+		refPrice := gradedPrice(botPrice, grade)
+		if price > int64(float64(refPrice)*e.buyThreshold) {
+			log.Printf("buy: skip %s price=%d ref=%d(grade%d) threshold=%.2f", tmpl, price, refPrice, grade, e.buyThreshold)
 			skippedPrice++
 			continue
 		}
@@ -392,7 +397,7 @@ func (e *Exchange) buyPlayerListings(ctx context.Context, orderExpiry int64) {
 		purchased++
 	}
 
-	if purchased+errs > 0 || skippedPrice > 0 {
+	if purchased+errs+skippedPrice+skippedUnknown > 0 {
 		log.Printf("buy: %d purchased, %d skipped-price, %d skipped-unknown, %d errors",
 			purchased, skippedPrice, skippedUnknown, errs)
 	}

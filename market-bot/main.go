@@ -19,7 +19,7 @@ var (
 	flagDBName       = flag.String("dbname", "dune", "PostgreSQL database")
 	flagCacheDB      = flag.String("cachedb", "/data/market-bot-cache.db", "SQLite path for category cache")
 	flagInterval     = flag.Duration("interval", 5*time.Minute, "restock tick interval")
-	flagBuyThreshold = flag.Float64("buythreshold", 1.0, "buy player listings at or below this multiple of the bot's sell price (0 = disable buying)")
+	flagBuyThreshold = flag.Float64("buythreshold", 1.05, "buy player listings at or below this multiple of the bot's sell price (0 = disable buying)")
 	flagMaxBuys      = flag.Int("maxbuys", 50, "max player listings to purchase per tick")
 )
 
