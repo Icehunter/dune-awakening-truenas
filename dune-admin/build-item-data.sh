@@ -4,6 +4,7 @@ set -euo pipefail
 RAW_PATH="${1:-item-data-raw.json}"
 OUT_PATH="${2:-item-data.json}"
 NAMES_PATH="${3:-dune-item-names.json}"
+SCHEMATICS_PATH="${4:-../systems/Items/BaseItems/DT_BaseItems_Schematics.json}"
 
 if ! command -v jq >/dev/null 2>&1; then
   echo "jq is required" >&2
@@ -16,14 +17,13 @@ if [ ! -f "$RAW_PATH" ]; then
   exit 1
 fi
 
-JQ_FILTER='
+# --- Step 1: build item-data.json from raw CDN data ---
+
+ITEMS_JQ_FILTER='
   def extract($item; $s):
     (if ($s.categories | type) == "number"
      then ($item[$s.categories] | if type == "array"
            then [.[] | $item[.]] | map(select(type=="string")) |
-                # When an item appears in multiple depth-2 misc subcategories (e.g. both
-                # items/misc/fuel and items/misc/refinedresources), prefer the shorter/more-
-                # specific misc path rather than blindly taking the longest string.
                 (if any(test("^items/misc/[^/]+$"))
                  then map(select(test("^items/misc/[^/]+$"))) | sort_by(length) | first
                  else sort_by(length) | last end)
@@ -63,11 +63,100 @@ JQ_FILTER='
 if [ -f "$NAMES_PATH" ]; then
   echo "Parsing $RAW_PATH (applying IDs from $NAMES_PATH)..."
   jq --slurpfile namesFile "$NAMES_PATH" \
-    '($namesFile[0] | map({key: (.ID | ascii_downcase), value: .ID}) | from_entries) as $nameMap |'"$JQ_FILTER" \
+    '($namesFile[0] | map({key: (.ID | ascii_downcase), value: .ID}) | from_entries) as $nameMap |'"$ITEMS_JQ_FILTER" \
     "$RAW_PATH" > "$OUT_PATH"
 else
   echo "Parsing $RAW_PATH (no names file found, using raw keys)..."
-  jq '{} as $nameMap |'"$JQ_FILTER" "$RAW_PATH" > "$OUT_PATH"
+  jq '{} as $nameMap |'"$ITEMS_JQ_FILTER" "$RAW_PATH" > "$OUT_PATH"
 fi
 
 echo "Wrote $OUT_PATH"
+
+# --- Step 2: merge schematics ---
+
+if [ ! -f "$SCHEMATICS_PATH" ]; then
+  echo "Schematics file not found ($SCHEMATICS_PATH), skipping schematic merge."
+  exit 0
+fi
+
+SCHEMATICS_JQ_FILTER='
+  def tag_to_category: {
+    "Items.Schematics.Clothes.ScoutArmor":  "items/garment/lightarmor",
+    "Items.Schematics.Clothes.HeavyArmor":  "items/garment/heavyarmor",
+    "Items.Schematics.Clothes.Stillsuit":   "items/garment/stillsuits",
+    "Items.Schematics.Clothes.Utility":     "items/garment/utilitywearables",
+    "Items.Schematics.MeleeWeapons.Knife":       "items/weapons/shortblades",
+    "Items.Schematics.MeleeWeapons.DualDaggers": "items/weapons/shortblades",
+    "Items.Schematics.MeleeWeapons.Sword":        "items/weapons/longblades",
+    "Items.Schematics.RangedWeapons.Light.Pistol":            "items/weapons/pistol",
+    "Items.Schematics.RangedWeapons.Light.Rifle.SMG":         "items/weapons/smg",
+    "Items.Schematics.RangedWeapons.Light.Rifle.Spitdart":    "items/weapons/spitdart",
+    "Items.Schematics.RangedWeapons.Light.Rifle.BattleRifle": "items/weapons/battlerifle",
+    "Items.Schematics.RangedWeapons.Light.Shotgun":           "items/weapons/shotgun",
+    "Items.Schematics.RangedWeapons.Heavy.Pistol":  "items/weapons/heavypistol",
+    "Items.Schematics.RangedWeapons.Heavy.Rifle":   "items/weapons/heavyrifle",
+    "Items.Schematics.RangedWeapons.Heavy.Shotgun": "items/weapons/heavyshotgun",
+    "Items.Schematics.RangedWeapons.Exotic.MissileLauncher": "items/weapons/missilelauncher",
+    "Items.Schematics.RangedWeapons.Exotic.Flamethrower":    "items/weapons/flamethrower",
+    "Items.Schematics.RangedWeapons.Exotic.Fireballer":      "items/weapons/fireballer",
+    "Items.Schematics.RangedWeapons.Exotic.Lasgun":          "items/weapons/lasgun",
+    "Items.Schematics.Deployables.VehicleBase.Sandbike":           "items/vehicles/sandbike",
+    "Items.Schematics.Deployables.VehicleBase.BuggyChoam":         "items/vehicles/buggy",
+    "Items.Schematics.Deployables.VehicleBase.LightOrniCHOAM":     "items/vehicles/lightornithopter",
+    "Items.Schematics.Deployables.VehicleBase.MediumOrniCHOAM":    "items/vehicles/mediumornithopter",
+    "Items.Schematics.Deployables.VehicleBase.TransportOrniCHOAM": "items/vehicles/transportornithopter",
+    "Items.Schematics.Deployables.VehicleBase.SandcrawlerCHOAM":   "items/vehicles/sandcrawler",
+    "Items.Schematics.Deployables.VehicleExtra.Sandbike":           "items/vehicles/sandbike",
+    "Items.Schematics.Deployables.VehicleExtra.BuggyChoam":         "items/vehicles/buggy",
+    "Items.Schematics.Deployables.VehicleExtra.LightOrniCHOAM":     "items/vehicles/lightornithopter",
+    "Items.Schematics.Deployables.VehicleExtra.LightOrniChoam":     "items/vehicles/lightornithopter",
+    "Items.Schematics.Deployables.VehicleExtra.MediumOrniCHOAM":    "items/vehicles/mediumornithopter",
+    "Items.Schematics.Deployables.VehicleExtra.TransportOrniCHOAM": "items/vehicles/transportornithopter",
+    "Items.Schematics.Deployables.VehicleExtra.Treadwheel":         "items/vehicles/sandcrawler",
+    "Items.Schematics.UtilityTools.Thumper":     "items/utility/deployables",
+    "Items.Schematics.HydrationTools.Water":     "items/utility/watertools",
+    "Items.Schematics.HydrationTools.Blood":     "items/utility/bloodtools",
+    "Items.Schematics.GatheringTools.Cutteray":  "items/utility/cutteray",
+    "Items.Schematics.GatheringTools.Compactor": "items/utility/staticcompactor",
+    "Items.Schematics.CartographyTools":          "items/utility/cartographytools",
+    "Items.Schematics.UtilityTools.Shield":      "items/utility/shield",
+    "Items.Schematics.UtilityTools.Suspensor":   "items/utility/suspensor",
+    "Items.Schematics.UtilityTools.Power":        "items/utility/powerpack",
+    "Items.Schematics.Augments.Armor":  "items/augment/armor",
+    "Items.Schematics.Augments.Melee":  "items/augment/melee",
+    "Items.Schematics.Augments.Ranged": "items/augment/ranged",
+    "Items.Schematics.Augments.Misc":   "items/augment/misc"
+  };
+
+  def get_tier(tags):
+    (tags | map(select(startswith("LootTier.")))
+          | if length > 0 then (.[0] | ltrimstr("LootTier.") | tonumber) else 3 end)
+    // 3;
+
+  .[0].Rows | to_entries | map(
+    .key as $key |
+    .value.StaticData as $sd |
+    ($sd.ItemTags // []) as $tags |
+    select(($tags | index("Items.ExcludeFromExchange")) == null) |
+    ($tags | map(. as $t | tag_to_category | to_entries | map(select(.key == $t)) | .[0]?.value)
+           | map(select(. != null)) | .[0]) as $cat |
+    select($cat != null) |
+    { key: $key, value: {
+        name: ($sd.Name.LocalizedString // $key), stack_max: 1, volume: 0.1,
+        tier: get_tier($tags), rarity: "Unique", vendor_price: 0,
+        category: $cat, tradeable: true, is_schematic: true
+    }}
+  ) | from_entries
+'
+
+echo "Extracting schematics from $SCHEMATICS_PATH..."
+STRIPPED=$(mktemp)
+sed 's/^\xef\xbb\xbf//' "$SCHEMATICS_PATH" > "$STRIPPED"
+SCHEMATICS_JSON=$(jq "$SCHEMATICS_JQ_FILTER" "$STRIPPED")
+rm "$STRIPPED"
+
+COUNT=$(echo "$SCHEMATICS_JSON" | jq 'length')
+TMP=$(mktemp)
+jq --argjson s "$SCHEMATICS_JSON" '.items = (.items + $s)' "$OUT_PATH" > "$TMP"
+mv "$TMP" "$OUT_PATH"
+echo "Merged $COUNT schematics into $OUT_PATH"

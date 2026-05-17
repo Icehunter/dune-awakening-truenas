@@ -150,34 +150,71 @@ var weaponPathRemap = map[string][2]byte{
 }
 
 // uniqueSchematicsD2 is the depth-2 code for UNIQUE SCHEMATICS under each
-// depth-1 category. Inferred from game UI tab ordering (0-indexed position).
-//   GARMENTS: LIGHT ARMOR(0) HEAVY ARMOR(1) STILLSUITS(2) UTILITY(3) SOCIAL(4) → UNIQUE SCHEMATICS(5)
-//   WEAPONS:  MELEE(0) RANGED(1) AMMUNITION(2) → UNIQUE SCHEMATICS(3)
+// depth-1 category. Confirmed from in-game UI screenshots (0-indexed position).
+//   GARMENTS:      LIGHT ARMOR(0) HEAVY ARMOR(1) STILLSUITS(2) UTILITY(3) SOCIAL(4) → UNIQUE SCHEMATICS(5)
+//   WEAPONS:       MELEE(0) RANGED(1) AMMUNITION(2) → UNIQUE SCHEMATICS(3)
+//   VEHICLES:      ONE MAN(0) FOUR MAN(1) LIGHT ORNITHOPTER(2) MEDIUM ORNITHOPTER(3) CARRY-ALL(4) SANDCRAWLER(5) → UNIQUE SCHEMATICS(6)
+//   UTILITY:       BUILDING TOOLS(0) DEPLOYABLES(1) HYDRATION(2) GATHERING(3) CARTOGRAPHY(4) UTILITY TOOLS(5) CONSUMABLES(6) → UNIQUE SCHEMATICS(7)
+//   AUGMENTATIONS: GARMENT(0) MELEE(1) RANGED(2) GENERIC(3) → UNIQUE SCHEMATICS(4)
 var uniqueSchematicsD2 = map[string]byte{
-	"garment": 5,
-	"weapons": 3,
+	"garment":  5,
+	"weapons":  3,
+	"vehicles": 6,
+	"utility":  7,
+	"augment":  4,
 }
 
-// uniqueSchematicsD3 maps an item's standard depth-2/3 type segment to its
-// depth-3 position within the UNIQUE SCHEMATICS subcategory, inferred from
-// the game UI's UNIQUE SCHEMATICS sub-tab ordering.
+// uniqueSchematicsD3 maps the last segment of an item's category path to its
+// depth-3 position within the UNIQUE SCHEMATICS subcategory.
+// Confirmed from in-game UI screenshots.
 var uniqueSchematicsD3 = map[string]byte{
-	// GARMENTS/UNIQUE SCHEMATICS: LIGHT ARMOR(0) HEAVY ARMOR(1) STILLSUITS(2) UTILITY(3) SOCIAL(4)
-	"lightarmor":      0,
-	"heavyarmor":      1,
-	"stillsuits":      2,
+	// GARMENTS/UNIQUE SCHEMATICS
+	"lightarmor":       0,
+	"heavyarmor":       1,
+	"stillsuits":       2,
 	"utilitywearables": 3,
-	"socialwearables": 4,
-	// WEAPONS/UNIQUE SCHEMATICS: SHORT BLADES(0) LONG BLADES(1) MAULA PISTOL(2)
-	// KARPOV 38(3) GRDA 44(4) DISRUPTOR M11(5) JABAL SPITDART(6) RAFIQ SNUBNOSE(7)
-	"shortblades":  0,
-	"longblades":   1,
-	"pistol":       2, // Maula Pistol series
-	"battlerifle":  3, // Karpov 38 series
-	"shotgun":      4, // GRDA 44 series
-	"smg":          5, // Disruptor M11 series (SMG)
-	"spitdart":     6, // Jabal Spitdart series
-	"rocketlauncher": 7, // Rafiq Snubnose / heavy (best guess)
+	"socialwearables":  4,
+
+	// WEAPONS/UNIQUE SCHEMATICS (confirmed from screenshots — previous mapping was wrong)
+	"shortblades":     0,
+	"longblades":      1,
+	"pistol":          2,  // MAULA PISTOL (Light.Pistol)
+	"heavypistol":     3,  // KARPOV 38 (Heavy.Pistol)
+	"heavyrifle":      4,  // GRDA 44 (Heavy.Rifle / LMG)
+	"smg":             5,  // DISRUPTOR M11
+	"spitdart":        6,  // JABAL SPITDART
+	"shotgun":         7,  // RAFIQ SNUBNOSE (Light.Shotgun)
+	"battlerifle":     8,  // DRILLSHOT FK7 (Light.Rifle.BattleRifle)
+	"heavyshotgun":    9,  // VULCAN GAU-92 (Heavy.Shotgun)
+	"missilelauncher": 10, // MISSILE LAUNCHER
+	"flamethrower":    11, // FLAMETHROWER
+	"fireballer":      12, // PYROCKET (Exotic.Fireballer)
+	"lasgun":          13, // LASGUN
+
+	// VEHICLES/UNIQUE SCHEMATICS
+	"sandbike":             0,
+	"buggy":                1,
+	"lightornithopter":     2,
+	"mediumornithopter":    3,
+	"transportornithopter": 4,
+	"sandcrawler":          5,
+
+	// UTILITY/UNIQUE SCHEMATICS
+	"deployables":    0,
+	"watertools":     1,
+	"bloodtools":     2,
+	"cutteray":       3,
+	"staticcompactor": 4,
+	"cartographytools": 5,
+	"shield":         6,
+	"suspensor":      7,
+	"powerpack":      8,
+
+	// AUGMENTATIONS/UNIQUE SCHEMATICS
+	"armor":  0,
+	"melee":  1,
+	"ranged": 2,
+	"misc":   3,
 }
 
 // UniqueSchematicsMask computes the category mask for Unique/Memento items,
@@ -276,9 +313,14 @@ func computePrice(item CatalogItem) int64 {
 	return roundPrice(basePrice(item))
 }
 
+// minMeaningfulVendorPrice is the threshold below which vendor_price is treated as a
+// placeholder (the game uses 1–2 for "can't be sold to vendor") and tier-based pricing
+// is used instead.
+const minMeaningfulVendorPrice = 10
+
 // basePrice returns the unrounded base price, shared by computePrice and adjustPrice.
 func basePrice(item CatalogItem) int64 {
-	if item.BasePrice > 0 {
+	if item.BasePrice >= minMeaningfulVendorPrice {
 		mult := vendorMult(item.Rarity)
 		return int64(math.Round(float64(item.BasePrice) * mult))
 	}

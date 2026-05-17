@@ -42,6 +42,8 @@ type Exchange struct {
 	categories    map[string]categoryEntry
 	gameEpochUnix int64 // unix timestamp of the game server's time epoch; 0 = unknown
 	nextPos       int64 // position_index counter for item inserts
+	buyThreshold  float64
+	maxBuys       int
 }
 
 func NewExchange(db *pgxpool.Pool, cachePath string, catalog []CatalogItem) (*Exchange, error) {
@@ -255,6 +257,13 @@ func (e *Exchange) refreshCategoryCache(ctx context.Context) {
 }
 
 func (e *Exchange) categoryFor(item CatalogItem) (mask int32, depth int16) {
+	if item.IsSchematic && item.Category != "" {
+		if m, d, ok := UniqueSchematicsMask(item.Category); ok {
+			return m, d
+		}
+		// Schematic whose category has no unique-schematics section — fall through.
+		return CategoryMask(item.Category, e.segIdx)
+	}
 	// Catalog items always use a freshly computed mask so stale cache values
 	// can never poison category filters.
 	if item.Category != "" {
@@ -264,6 +273,106 @@ func (e *Exchange) categoryFor(item CatalogItem) (mask int32, depth int16) {
 		return c.mask, c.depth
 	}
 	return 0, 0
+}
+
+func (e *Exchange) buyPlayerListings(ctx context.Context) {
+	if e.buyThreshold <= 0 {
+		return
+	}
+
+	rows, err := e.db.Query(ctx, `
+		SELECT o.id, o.template_id, o.item_price, o.item_id, o.owner_id, s.initial_stack_size
+		FROM dune.dune_exchange_orders o
+		JOIN dune.dune_exchange_sell_orders s ON s.order_id = o.id
+		WHERE o.is_npc_order = FALSE AND o.exchange_id = $1
+		LIMIT $2`, e.exchangeID, e.maxBuys*10)
+	if err != nil {
+		log.Printf("buy: query: %v", err)
+		return
+	}
+	defer rows.Close()
+
+	purchased, skippedPrice, skippedUnknown, errs := 0, 0, 0, 0
+
+	for rows.Next() {
+		if purchased >= e.maxBuys {
+			break
+		}
+
+		var orderID, price, itemID, sellerActorID, stackSize int64
+		var tmpl string
+		if err := rows.Scan(&orderID, &tmpl, &price, &itemID, &sellerActorID, &stackSize); err != nil {
+			errs++
+			continue
+		}
+
+		botPrice, known := e.prices[tmpl]
+		if !known || botPrice <= 0 {
+			skippedUnknown++
+			continue
+		}
+		if price > int64(float64(botPrice)*e.buyThreshold) {
+			skippedPrice++
+			continue
+		}
+
+		totalCost := price * stackSize
+
+		// Direct purchase: credit seller, debit bot, delete listing + item.
+		// This avoids the dune_exchange_fulfilled_sell_order procedure which
+		// creates exchange-storage records the client misinterprets as expired orders.
+		tx, err := e.db.Begin(ctx)
+		if err != nil {
+			errs++
+			continue
+		}
+		ok := true
+		for _, q := range []struct {
+			sql  string
+			args []any
+		}{
+			// Credit seller's wallet (player_virtual_currency_balances).
+			// player_controller_id == actor id for player characters.
+			{`UPDATE dune.player_virtual_currency_balances
+			    SET balance = balance + $1
+			    WHERE player_controller_id = $2
+			    AND currency_id = dune.get_solaris_id()`, []any{totalCost, sellerActorID}},
+			// Debit bot's exchange balance.
+			{`UPDATE dune.dune_exchange_users
+			    SET solari_balance = solari_balance - $1
+			    WHERE owner_id = $2`, []any{totalCost, e.ownerID}},
+			// Remove the active sell order and its item.
+			{`DELETE FROM dune.dune_exchange_sell_orders WHERE order_id = $1`, []any{orderID}},
+			{`DELETE FROM dune.dune_exchange_orders WHERE id = $1`, []any{orderID}},
+		} {
+			if _, err := tx.Exec(ctx, q.sql, q.args...); err != nil {
+				log.Printf("buy: %s: %v", tmpl, err)
+				ok = false
+				break
+			}
+		}
+		if ok && itemID > 0 {
+			if _, err := tx.Exec(ctx, `DELETE FROM dune.items WHERE id = $1`, itemID); err != nil {
+				log.Printf("buy: delete item %d: %v", itemID, err)
+				ok = false
+			}
+		}
+		if !ok {
+			tx.Rollback(ctx)
+			errs++
+			continue
+		}
+		if err := tx.Commit(ctx); err != nil {
+			errs++
+			continue
+		}
+		purchased++
+	}
+
+	if purchased+errs > 0 || skippedPrice > 0 {
+		log.Printf("buy: %d purchased, %d skipped-price, %d skipped-unknown, %d errors",
+			purchased, skippedPrice, skippedUnknown, errs)
+	}
 }
 
 // createListing inserts one sell order + its item directly into the DB.
@@ -330,6 +439,8 @@ func (e *Exchange) Tick(ctx context.Context, catalog []CatalogItem) {
 		orderExpiry = 999_999_999
 	}
 
+	e.buyPlayerListings(ctx)
+
 	// Load all current bot listings.
 	rows, err := e.db.Query(ctx, `
 		SELECT o.id, o.template_id, o.item_id, o.item_price, i.stack_size
@@ -361,6 +472,9 @@ func (e *Exchange) Tick(ctx context.Context, catalog []CatalogItem) {
 		price := e.prices[item.TemplateID]
 		if price <= 0 {
 			price = item.ListPrice
+		}
+		if price <= 0 {
+			continue // item has no meaningful price, skip
 		}
 
 		listings := current[item.TemplateID]

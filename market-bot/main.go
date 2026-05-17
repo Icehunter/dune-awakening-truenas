@@ -12,13 +12,15 @@ import (
 )
 
 var (
-	flagDBHost   = flag.String("dbhost", "", "PostgreSQL host (required)")
-	flagDBPort   = flag.Int("dbport", 15432, "PostgreSQL port")
-	flagDBUser   = flag.String("dbuser", "dune", "PostgreSQL user")
-	flagDBPass   = flag.String("dbpass", "dune", "PostgreSQL password")
-	flagDBName   = flag.String("dbname", "dune", "PostgreSQL database")
-	flagCacheDB  = flag.String("cachedb", "/data/market-bot-cache.db", "SQLite path for category cache")
-	flagInterval = flag.Duration("interval", 5*time.Minute, "restock tick interval")
+	flagDBHost       = flag.String("dbhost", "", "PostgreSQL host (required)")
+	flagDBPort       = flag.Int("dbport", 15432, "PostgreSQL port")
+	flagDBUser       = flag.String("dbuser", "dune", "PostgreSQL user")
+	flagDBPass       = flag.String("dbpass", "dune", "PostgreSQL password")
+	flagDBName       = flag.String("dbname", "dune", "PostgreSQL database")
+	flagCacheDB      = flag.String("cachedb", "/data/market-bot-cache.db", "SQLite path for category cache")
+	flagInterval     = flag.Duration("interval", 5*time.Minute, "restock tick interval")
+	flagBuyThreshold = flag.Float64("buythreshold", 1.0, "buy player listings at or below this multiple of the bot's sell price (0 = disable buying)")
+	flagMaxBuys      = flag.Int("maxbuys", 50, "max player listings to purchase per tick")
 )
 
 func main() {
@@ -61,6 +63,8 @@ func main() {
 	if err != nil {
 		log.Fatalf("init exchange: %v", err)
 	}
+	ex.buyThreshold = *flagBuyThreshold
+	ex.maxBuys = *flagMaxBuys
 
 	log.Println("initializing exchange...")
 	if err := ex.Init(ctx, catalog); err != nil {

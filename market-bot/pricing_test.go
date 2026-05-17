@@ -10,35 +10,61 @@ func TestUniqueSchematicsMask(t *testing.T) {
 		category string
 		wantMask int32
 	}{
-		// GARMENTS → UNIQUE SCHEMATICS(5) → lightarmor(0)/heavyarmor(1)/stillsuits(2)
+		// GARMENTS(0) → UNIQUE SCHEMATICS(5) → lightarmor(0)/heavyarmor(1)/stillsuits(2)/social(4)
 		{"items/garment/lightarmor/chest", 0x00050000},
 		{"items/garment/heavyarmor/head", 0x00050100},
 		{"items/garment/stillsuits/hands", 0x00050200},
 		{"items/garment/socialwearables/chest", 0x00050400},
-		// WEAPONS → UNIQUE SCHEMATICS(3) → shortblades(0)/longblades(1)/pistol(2)/battlerifle(3)
+		// WEAPONS(1) → UNIQUE SCHEMATICS(3) — confirmed D3 codes from in-game screenshots
 		{"items/weapons/shortblades", 0x01030000},
 		{"items/weapons/longblades", 0x01030100},
-		{"items/weapons/sidearms/pistol", 0x01030200},
-		{"items/weapons/rifles/battlerifle", 0x01030300},
-		{"items/weapons/rifles/spitdart", 0x01030600},
-		// Non-remapped categories stay standard (ok=false)
+		{"items/weapons/pistol", 0x01030200},      // Maula Pistol (Light.Pistol)
+		{"items/weapons/heavypistol", 0x01030300}, // Karpov 38 (Heavy.Pistol)
+		{"items/weapons/heavyrifle", 0x01030400},  // GRDA 44 (Heavy.Rifle)
+		{"items/weapons/smg", 0x01030500},         // Disruptor M11
+		{"items/weapons/spitdart", 0x01030600},    // Jabal Spitdart
+		{"items/weapons/shotgun", 0x01030700},     // Rafiq Snubnose (Light.Shotgun)
+		{"items/weapons/battlerifle", 0x01030800}, // Drillshot FK7 (was wrongly 3 in old code)
+		{"items/weapons/heavyshotgun", 0x01030900},
+		{"items/weapons/missilelauncher", 0x01030A00},
+		{"items/weapons/flamethrower", 0x01030B00},
+		{"items/weapons/fireballer", 0x01030C00}, // Pyrocket
+		{"items/weapons/lasgun", 0x01030D00},
+		// VEHICLES(2) → UNIQUE SCHEMATICS(6)
+		{"items/vehicles/sandbike", 0x02060000},
+		{"items/vehicles/buggy", 0x02060100},
+		{"items/vehicles/lightornithopter", 0x02060200},
+		{"items/vehicles/mediumornithopter", 0x02060300},
+		{"items/vehicles/transportornithopter", 0x02060400},
+		{"items/vehicles/sandcrawler", 0x02060500},
+		// UTILITY(3) → UNIQUE SCHEMATICS(7)
+		{"items/utility/deployables", 0x03070000},
+		{"items/utility/watertools", 0x03070100},
+		{"items/utility/cutteray", 0x03070300},
+		{"items/utility/suspensor", 0x03070700},
+		{"items/utility/powerpack", 0x03070800},
+		// AUGMENTATIONS(4) → UNIQUE SCHEMATICS(4)
+		{"items/augment/armor", 0x04040000},
+		{"items/augment/melee", 0x04040100},
+		{"items/augment/ranged", 0x04040200},
+		{"items/augment/misc", 0x04040300},
 	}
 
 	for _, tc := range cases {
 		mask, depth, ok := UniqueSchematicsMask(tc.category)
 		if !ok {
-			t.Errorf("%-45s: got ok=false, want mask=0x%08X", tc.category, uint32(tc.wantMask))
+			t.Errorf("%-50s: got ok=false, want mask=0x%08X", tc.category, uint32(tc.wantMask))
 			continue
 		}
 		if mask != tc.wantMask {
-			t.Errorf("%-45s: got=0x%08X depth=%d want=0x%08X", tc.category, uint32(mask), depth, uint32(tc.wantMask))
+			t.Errorf("%-50s: got=0x%08X depth=%d want=0x%08X", tc.category, uint32(mask), depth, uint32(tc.wantMask))
 		} else {
-			fmt.Printf("OK %-45s 0x%08X depth=%d\n", tc.category, uint32(mask), depth)
+			fmt.Printf("OK %-50s 0x%08X depth=%d\n", tc.category, uint32(mask), depth)
 		}
 	}
 
-	// Categories without UNIQUE SCHEMATICS section should return ok=false
-	for _, cat := range []string{"items/augment/ranged", "items/misc/components", "items/vehicles/sandbike/chassis"} {
+	// Only MISC has no UNIQUE SCHEMATICS section
+	for _, cat := range []string{"items/misc/components", "items/misc/rawresources"} {
 		if _, _, ok := UniqueSchematicsMask(cat); ok {
 			t.Errorf("%s: expected ok=false (no unique schematics remapping)", cat)
 		}

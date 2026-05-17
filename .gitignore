@@ -22,3 +22,4 @@ market-bot/dune-market-bot
 
 settings.local.json
 steamcmd/*
+systems/
