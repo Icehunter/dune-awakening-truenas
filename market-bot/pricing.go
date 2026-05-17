@@ -325,7 +325,7 @@ func basePrice(item CatalogItem) int64 {
 	if item.MaterialCost > 0 && item.StackMax <= 1 && !item.IsSchematic &&
 		(strings.ToLower(item.Rarity) == "unique" || strings.ToLower(item.Rarity) == "memento") {
 		schemPrice := float64(schematicEquipmentPrice(item.Tier)) * rarityMult(item.Rarity)
-		return int64(math.Round(schemPrice + float64(item.MaterialCost)*0.75))
+		return int64(math.Round(schemPrice + float64(materialCostForGrade(item, 0))*0.75))
 	}
 	if item.BasePrice >= minMeaningfulVendorPrice {
 		mult := vendorMult(item.Rarity)
@@ -475,6 +475,28 @@ func gradePriceMult(grade int64) float64 {
 // gradedPrice returns the grade-adjusted listing price, rounded to a clean step.
 func gradedPrice(basePrice int64, grade int64) int64 {
 	return roundPrice(int64(math.Round(float64(basePrice) * gradePriceMult(grade))))
+}
+
+// materialCostForGrade returns the recipe material cost for a specific grade.
+// Falls back to MaterialCost (grade-5 / last tier) when per-grade data is absent.
+func materialCostForGrade(item CatalogItem, grade int64) int64 {
+	if grade >= 0 && grade <= 5 && item.MaterialCostPerGrade[grade] > 0 {
+		return item.MaterialCostPerGrade[grade]
+	}
+	return item.MaterialCost
+}
+
+// gradeFloor returns the listing price floor for item at the given grade.
+// For unique/memento equipment with crafting recipes, each grade's price is derived
+// from that grade's actual material cost rather than a flat multiplier.
+func gradeFloor(item CatalogItem, grade int64) int64 {
+	if item.MaterialCost > 0 && item.StackMax <= 1 && !item.IsSchematic &&
+		(strings.ToLower(item.Rarity) == "unique" || strings.ToLower(item.Rarity) == "memento") {
+		mc := materialCostForGrade(item, grade)
+		schemPrice := float64(schematicEquipmentPrice(item.Tier)) * rarityMult(item.Rarity)
+		return roundPrice(int64(math.Round(schemPrice + float64(mc)*0.75)))
+	}
+	return gradedPrice(roundPrice(basePrice(item)), grade)
 }
 
 // roundPrice rounds to a magnitude-appropriate step so prices look clean.

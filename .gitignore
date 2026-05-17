@@ -3,12 +3,15 @@ sshKey
 sshKey.pub
 dune-admin/sshKey
 
-# Generated item data — built locally via fetch-item-data.js + build-item-data.sh
+# Generated item data — built locally via build-item-data.sh from CDT_BaseItems.json
 dune-admin/item-data-raw.json
-# dune-admin/item-data.json
+dune-admin/dune-item-names.json
 
 # Browser fetch script — local dev tool, not for sharing
 dune-admin/fetch-item-data.js
+
+# Local deploy config (cached DB host — machine-specific, not for sharing)
+market-bot/.deploy-config
 
 # Compiled binaries
 dune-admin/dune-admin

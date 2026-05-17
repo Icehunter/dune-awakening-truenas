@@ -63,6 +63,36 @@ try {
 Write-Host "==> Preparing remote directories..." -ForegroundColor Cyan
 Invoke-Ssh "sudo mkdir -p ${RemoteDir}/{data,cache,bin} && sudo chown -R ${VmUser}:${VmUser} ${RemoteDir}"
 
+# ── 2a. Detect or load cached DB host ─────────────────────────────────────────
+$DeployConfig = Join-Path $ScriptDir ".deploy-config"
+$DetectedDbHost = ""
+
+Write-Host "==> Detecting DB host from cluster..." -ForegroundColor Cyan
+if (Test-Path $DeployConfig) {
+    $cached = Get-Content $DeployConfig | Where-Object { $_ -match '^DUNE_DB_HOST=' } | Select-Object -First 1
+    if ($cached) {
+        $DetectedDbHost = $cached.Split('=', 2)[1].Trim()
+        Write-Host "    using cached: $DetectedDbHost"
+        Write-Host "    (delete $DeployConfig to re-detect)"
+    }
+}
+if (-not $DetectedDbHost) {
+    try {
+        $svcLine = & ssh -o StrictHostKeyChecking=no -i $SshKey "${VmUser}@${VmIp}" "sudo kubectl get svc -A --no-headers 2>/dev/null | grep 'db-dbdepl-svc'" 2>$null
+        if ($svcLine) {
+            $parts = ($svcLine -split '\s+', 3)
+            $svcNs = $parts[0]; $svcName = $parts[1]
+            $DetectedDbHost = "${svcName}.${svcNs}.svc.cluster.local"
+            "DUNE_DB_HOST=${DetectedDbHost}" | Set-Content $DeployConfig
+            Write-Host "    detected and cached: $DetectedDbHost"
+        } else {
+            Write-Host "    warn: DB service not found, using value from k8s/market-bot.yaml"
+        }
+    } catch {
+        Write-Host "    warn: detection failed: $_" -ForegroundColor Yellow
+    }
+}
+
 # ── 2b. Drop existing bot orders ─────────────────────────────────────────────
 Write-Host "==> Dropping existing bot orders..." -ForegroundColor Cyan
 try {
@@ -70,9 +100,22 @@ try {
     if ($dbInfo) {
         $parts  = ($dbInfo -split '\s+', 3)
         $dbNs   = $parts[0]; $dbPod = $parts[1]
-        $sql    = "DELETE FROM dune.items WHERE id IN (SELECT item_id FROM dune.dune_exchange_orders WHERE owner_id = 158 AND is_npc_order = TRUE AND item_id IS NOT NULL); DELETE FROM dune.dune_exchange_orders WHERE owner_id = 158 AND is_npc_order = TRUE;"
-        Invoke-Ssh "sudo kubectl exec -n $dbNs $dbPod -- psql -U dune -h localhost -p 15432 -d dune -c '$sql'"
-        Write-Host "    done."
+        $sql = @"
+WITH bot AS (SELECT id FROM dune.actors WHERE class = 'Revy' LIMIT 1),
+del_orders AS (
+  DELETE FROM dune.dune_exchange_orders
+  WHERE owner_id = (SELECT id FROM bot) AND is_npc_order = TRUE
+  RETURNING item_id
+),
+del_items AS (
+  DELETE FROM dune.items
+  WHERE id IN (SELECT item_id FROM del_orders WHERE item_id IS NOT NULL)
+  RETURNING id
+)
+SELECT (SELECT COUNT(*) FROM del_orders) AS orders_deleted,
+       (SELECT COUNT(*) FROM del_items)  AS items_deleted;
+"@
+        $sql | & ssh -o StrictHostKeyChecking=no -i $SshKey "${VmUser}@${VmIp}" "sudo kubectl exec -n $dbNs $dbPod -i -- psql -U dune -h localhost -p 15432 -d dune"
     } else {
         Write-Host "    warn: DB pod not found, skipping order cleanup."
     }
@@ -87,19 +130,21 @@ Invoke-Ssh "sudo mv /tmp/market-bot-new ${RemoteDir}/bin/market-bot && sudo chmo
 
 # ── 4. Upload item data ───────────────────────────────────────────────────────
 Write-Host "==> Uploading item data..." -ForegroundColor Cyan
-Invoke-Scp (Join-Path $DataDir "item-data.json")      "${VmUser}@${VmIp}:${RemoteDir}/data/item-data.json"
-Invoke-Scp (Join-Path $DataDir "dune-item-names.json") "${VmUser}@${VmIp}:${RemoteDir}/data/dune-item-names.json"
+Invoke-Scp (Join-Path $DataDir "item-data.json") "${VmUser}@${VmIp}:${RemoteDir}/data/item-data.json"
 
 # ── 5. Apply k8s manifest ─────────────────────────────────────────────────────
 Write-Host "==> Applying k8s manifests..." -ForegroundColor Cyan
 $manifest = Get-Content (Join-Path $ScriptDir "k8s\market-bot.yaml") -Raw
+if ($DetectedDbHost) {
+    $manifest = $manifest -replace '(?m)^(\s*DB_HOST:\s*).*$', "`${1}${DetectedDbHost}"
+}
 $manifest | & ssh -o StrictHostKeyChecking=no -i $SshKey "${VmUser}@${VmIp}" "sudo kubectl apply -f -"
 if ($LASTEXITCODE -ne 0) { throw "kubectl apply failed" }
 
 # ── 6. Rollout ────────────────────────────────────────────────────────────────
 Write-Host "==> Restarting deployment..." -ForegroundColor Cyan
 Invoke-Ssh "sudo kubectl rollout restart deployment/market-bot -n dune-market-bot"
-Invoke-Ssh "sudo kubectl rollout status deployment/market-bot -n dune-market-bot --timeout=90s"
+& ssh -o StrictHostKeyChecking=no -i $SshKey "${VmUser}@${VmIp}" "sudo kubectl rollout status deployment/market-bot -n dune-market-bot --timeout=90s" 2>&1 | Out-Host
 
 # ── 7. Logs ───────────────────────────────────────────────────────────────────
 Write-Host ""

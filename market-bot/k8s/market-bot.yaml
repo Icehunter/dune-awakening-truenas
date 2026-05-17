@@ -13,7 +13,6 @@ metadata:
 data:
   # Paths inside the container — item data files are copied from the repo
   ITEM_DATA_PATH: /data/item-data.json
-  ITEM_NAMES_PATH: /data/dune-item-names.json
   CACHE_DB_PATH: /cache/market-bot-cache.db
   # !! CHANGE THIS before deploying — must match your cluster's DB service name.
   # Run this on the VM to find the correct value:
@@ -23,7 +22,8 @@ data:
   DB_PORT: "15432"
   DB_USER: dune
   DB_NAME: dune
-  INTERVAL: 5m
+  BUY_INTERVAL: 5m
+  LIST_INTERVAL: 30m
 
 ---
 apiVersion: v1
@@ -68,9 +68,9 @@ spec:
             - -dbpass=$(DB_PASS)
             - -dbname=$(DB_NAME)
             - -itemdata=$(ITEM_DATA_PATH)
-            - -itemnames=$(ITEM_NAMES_PATH)
             - -cachedb=$(CACHE_DB_PATH)
-            - -interval=$(INTERVAL)
+            - -buyinterval=$(BUY_INTERVAL)
+            - -listinterval=$(LIST_INTERVAL)
           env:
             - name: DB_HOST
               valueFrom:
@@ -102,16 +102,16 @@ spec:
                 configMapKeyRef:
                   name: market-bot-config
                   key: ITEM_DATA_PATH
-            - name: ITEM_NAMES_PATH
+            - name: BUY_INTERVAL
               valueFrom:
                 configMapKeyRef:
                   name: market-bot-config
-                  key: ITEM_NAMES_PATH
-            - name: INTERVAL
+                  key: BUY_INTERVAL
+            - name: LIST_INTERVAL
               valueFrom:
                 configMapKeyRef:
                   name: market-bot-config
-                  key: INTERVAL
+                  key: LIST_INTERVAL
             - name: CACHE_DB_PATH
               valueFrom:
                 configMapKeyRef:

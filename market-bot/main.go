@@ -18,10 +18,18 @@ var (
 	flagDBPass       = flag.String("dbpass", "dune", "PostgreSQL password")
 	flagDBName       = flag.String("dbname", "dune", "PostgreSQL database")
 	flagCacheDB      = flag.String("cachedb", "/data/market-bot-cache.db", "SQLite path for category cache")
-	flagInterval     = flag.Duration("interval", 5*time.Minute, "restock tick interval")
+	flagBuyInterval  = flag.Duration("buyinterval", 5*time.Minute, "how often to buy player listings")
+	flagListInterval = flag.Duration("listinterval", 30*time.Minute, "how often to restock/prune bot listings")
 	flagBuyThreshold = flag.Float64("buythreshold", 1.05, "buy player listings at or below this multiple of the bot's sell price (0 = disable buying)")
 	flagMaxBuys      = flag.Int("maxbuys", 50, "max player listings to purchase per tick")
 )
+
+func minDuration(a, b time.Duration) time.Duration {
+	if a < b {
+		return a
+	}
+	return b
+}
 
 func main() {
 	flag.Parse()
@@ -72,12 +80,21 @@ func main() {
 	}
 	log.Println("exchange ready")
 
-	// First tick immediately, then on interval.
+	// Run both immediately on start.
 	ex.Tick(ctx, catalog)
 
-	ticker := time.NewTicker(*flagInterval)
-	defer ticker.Stop()
-	for range ticker.C {
-		ex.Tick(ctx, catalog)
+	tick := time.NewTicker(minDuration(*flagBuyInterval, *flagListInterval))
+	defer tick.Stop()
+	nextBuy := time.Now().Add(*flagBuyInterval)
+	nextList := time.Now().Add(*flagListInterval)
+	for now := range tick.C {
+		if now.After(nextBuy) {
+			ex.BuyTick(ctx)
+			nextBuy = now.Add(*flagBuyInterval)
+		}
+		if now.After(nextList) {
+			ex.ListTick(ctx, catalog)
+			nextList = now.Add(*flagListInterval)
+		}
 	}
 }

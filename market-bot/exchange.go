@@ -25,13 +25,22 @@ type gradeKey struct {
 }
 
 // applicableGrades returns which quality levels to list an item at.
-// Gradeable equipment (drops from overland testing stations) gets grades 0–5.
-// Everything else (stackables, schematics, non-gradeable gear) gets grade 0 only.
+// Items whose schematic drops from overland testing stations (ecolabs) are gradeable 0–5
+// (or from MinQualityLevel–5 for augments that only drop at higher grades).
+// Stackables and items without an ecolab schematic get grade 0 only.
 func applicableGrades(item CatalogItem) []int64 {
-	if item.StackMax > 1 || item.IsSchematic || !item.IsGradeable {
+	if item.StackMax > 1 || !item.IsGradeable {
 		return []int64{0}
 	}
-	return []int64{0, 1, 2, 3, 4, 5}
+	min := item.MinQualityLevel
+	if min < 0 || min > 5 {
+		min = 0
+	}
+	grades := make([]int64, 0, 6-min)
+	for g := min; g <= 5; g++ {
+		grades = append(grades, int64(g))
+	}
+	return grades
 }
 
 type categoryEntry struct {
@@ -418,6 +427,86 @@ func (e *Exchange) buyPlayerListings(ctx context.Context, orderExpiry int64) {
 	}
 }
 
+// pendingListing holds the data needed to batch-insert a new bot listing.
+type pendingListing struct {
+	item      CatalogItem
+	basePrice int64
+	stackMax  int64
+	expiry    int64
+	grade     int64
+}
+
+// createListingsBatch inserts up to batchSize listings per transaction.
+// Returns (created, errors).
+func (e *Exchange) createListingsBatch(ctx context.Context, listings []pendingListing) (int, int) {
+	const batchSize = 100
+	created, errs := 0, 0
+	for i := 0; i < len(listings); i += batchSize {
+		end := i + batchSize
+		if end > len(listings) {
+			end = len(listings)
+		}
+		batch := listings[i:end]
+
+		tx, err := e.db.Begin(ctx)
+		if err != nil {
+			errs += len(batch)
+			continue
+		}
+		ok := true
+		for _, pl := range batch {
+			catMask, catDepth := e.categoryFor(pl.item)
+			qualityLevel := pl.grade
+			listPrice := gradeFloor(pl.item, pl.grade)
+			if pl.item.MaterialCost <= 0 {
+				listPrice = gradedPrice(pl.basePrice, pl.grade)
+			}
+			var itemID int64
+			if err := tx.QueryRow(ctx, `
+				INSERT INTO dune.items (inventory_id, stack_size, position_index, template_id, quality_level, stats)
+				VALUES ($1, $2, $3, $4, $5, '{}') RETURNING id`,
+				e.botInvID, pl.stackMax, e.nextPos, pl.item.TemplateID, qualityLevel).Scan(&itemID); err != nil {
+				log.Printf("batch insert item %s grade %d: %v", pl.item.TemplateID, pl.grade, err)
+				ok = false
+				errs++
+				break
+			}
+			e.nextPos++
+			var orderID int64
+			if err := tx.QueryRow(ctx, `
+				INSERT INTO dune.dune_exchange_orders
+				  (exchange_id, access_point_id, owner_id, is_npc_order, expiration_time,
+				   template_id, durability_cur, durability_max, category_mask, category_depth,
+				   item_price, quality_level, item_id)
+				VALUES ($1,$2,$3,TRUE,$4,$5,$6,$7,$8,$9,$10,$11,$12) RETURNING id`,
+				e.exchangeID, e.accessPointID, e.ownerID, pl.expiry,
+				pl.item.TemplateID, float32(1.0), float32(1.0),
+				catMask, catDepth, listPrice, qualityLevel, itemID).Scan(&orderID); err != nil {
+				log.Printf("batch insert order %s grade %d: %v", pl.item.TemplateID, pl.grade, err)
+				ok = false
+				errs++
+				break
+			}
+			if _, err := tx.Exec(ctx, `
+				INSERT INTO dune.dune_exchange_sell_orders (order_id, initial_stack_size, wear_normalized_price)
+				VALUES ($1, $2, $3)`,
+				orderID, pl.stackMax, listPrice); err != nil {
+				log.Printf("batch insert sell order %s grade %d: %v", pl.item.TemplateID, pl.grade, err)
+				ok = false
+				errs++
+				break
+			}
+			created++
+		}
+		if ok {
+			tx.Commit(ctx)
+		} else {
+			tx.Rollback(ctx)
+		}
+	}
+	return created, errs
+}
+
 // createListing inserts one sell order + its item directly into the DB at the given grade.
 func (e *Exchange) createListing(ctx context.Context, item CatalogItem, basePrice, stackMax, expiry, grade int64) error {
 	catMask, catDepth := e.categoryFor(item)
@@ -429,7 +518,10 @@ func (e *Exchange) createListing(ctx context.Context, item CatalogItem, basePric
 	defer tx.Rollback(ctx)
 
 	qualityLevel := grade
-	listPrice := gradedPrice(basePrice, grade)
+	listPrice := gradeFloor(item, grade)
+	if item.MaterialCost <= 0 {
+		listPrice = gradedPrice(basePrice, grade)
+	}
 
 	// Item goes directly into the exchange inventory.
 	var itemID int64
@@ -464,7 +556,24 @@ func (e *Exchange) createListing(ctx context.Context, item CatalogItem, basePric
 	return tx.Commit(ctx)
 }
 
-func (e *Exchange) Tick(ctx context.Context, catalog []CatalogItem) {
+// BuyTick runs the buy-side operations: learn game epoch and purchase player listings.
+func (e *Exchange) BuyTick(ctx context.Context) {
+	e.learnGameEpoch(ctx)
+
+	gameNow := e.gameNow()
+	var orderExpiry int64
+	if gameNow > 0 {
+		orderExpiry = gameNow + orderExpirySecs
+	} else {
+		orderExpiry = 999_999_999
+	}
+
+	e.buyPlayerListings(ctx, orderExpiry)
+}
+
+// ListTick runs the listing/pruning operations: refresh caches, update prices,
+// prune stale listings, top up depleted stacks, and create new listings.
+func (e *Exchange) ListTick(ctx context.Context, catalog []CatalogItem) {
 	e.learnGameEpoch(ctx)
 	e.refreshCategoryCache(ctx)
 	e.updatePrices(ctx, catalog)
@@ -476,8 +585,6 @@ func (e *Exchange) Tick(ctx context.Context, catalog []CatalogItem) {
 	} else {
 		orderExpiry = 999_999_999
 	}
-
-	e.buyPlayerListings(ctx, orderExpiry)
 
 	// Load all current bot listings grouped by (template, grade).
 	rows, err := e.db.Query(ctx, `
@@ -501,6 +608,12 @@ func (e *Exchange) Tick(ctx context.Context, catalog []CatalogItem) {
 	}
 	rows.Close()
 
+	// Slices accumulated across the full catalog loop, flushed in bulk at the end.
+	var staleOrderIDs, staleItemIDs []int64
+	type topUp struct{ itemID, stackMax int64 }
+	var topUps []topUp
+	var pending []pendingListing
+
 	created, topped, pruned, errs := 0, 0, 0, 0
 
 	for _, item := range catalog {
@@ -517,46 +630,80 @@ func (e *Exchange) Tick(ctx context.Context, catalog []CatalogItem) {
 		}
 
 		for _, grade := range applicableGrades(item) {
-			price := gradedPrice(basePrice, grade)
+			price := gradeFloor(item, grade)
+			if item.MaterialCost <= 0 {
+				price = gradedPrice(basePrice, grade)
+			}
 			key := gradeKey{item.TemplateID, grade}
 			listings := current[key]
 
-			// Remove listings where the grade-adjusted price is stale.
+			// Collect stale listings (wrong price) for bulk delete.
 			var valid []listingInfo
 			for _, l := range listings {
 				if l.price != price {
-					e.db.Exec(ctx, `DELETE FROM dune.dune_exchange_orders WHERE id = $1`, l.orderID)
-					e.db.Exec(ctx, `DELETE FROM dune.items WHERE id = $1`, l.itemID)
+					staleOrderIDs = append(staleOrderIDs, l.orderID)
+					staleItemIDs = append(staleItemIDs, l.itemID)
 					pruned++
 				} else {
 					valid = append(valid, l)
 				}
 			}
 
-			// Top up depleted stacks and refresh expiry on valid listings.
+			// Collect depleted stacks for bulk update.
 			for _, l := range valid {
 				if l.stackSize < stackMax {
-					e.db.Exec(ctx, `UPDATE dune.items SET stack_size = $1 WHERE id = $2`, stackMax, l.itemID)
+					topUps = append(topUps, topUp{l.itemID, stackMax})
 					topped++
 				}
-				e.db.Exec(ctx,
-					`UPDATE dune.dune_exchange_orders SET expiration_time = $1 WHERE id = $2`,
-					orderExpiry, l.orderID)
 			}
 
-			// Create listings to reach listingsPerGrade for this grade.
+			// Accumulate listings to create to reach listingsPerGrade.
 			for i := len(valid); i < listingsPerGrade; i++ {
-				if err := e.createListing(ctx, item, basePrice, stackMax, orderExpiry, grade); err != nil {
-					log.Printf("listing %s grade %d: %v", item.TemplateID, grade, err)
-					errs++
-				} else {
-					created++
-				}
+				pending = append(pending, pendingListing{
+					item:      item,
+					basePrice: basePrice,
+					stackMax:  stackMax,
+					expiry:    orderExpiry,
+					grade:     grade,
+				})
 			}
 		}
 	}
 
-	log.Printf("tick: %d created, %d topped up, %d pruned, %d errors", created, topped, pruned, errs)
+	// Bulk delete stale orders and their items.
+	if len(staleOrderIDs) > 0 {
+		e.db.Exec(ctx, `DELETE FROM dune.dune_exchange_orders WHERE id = ANY($1)`, staleOrderIDs)
+		e.db.Exec(ctx, `DELETE FROM dune.items WHERE id = ANY($1)`, staleItemIDs)
+	}
+
+	// Bulk update depleted stacks.
+	if len(topUps) > 0 {
+		ids := make([]int64, len(topUps))
+		sizes := make([]int64, len(topUps))
+		for i, t := range topUps {
+			ids[i] = t.itemID
+			sizes[i] = t.stackMax
+		}
+		e.db.Exec(ctx, `
+			UPDATE dune.items SET stack_size = u.s
+			FROM unnest($1::bigint[], $2::bigint[]) AS u(id, s)
+			WHERE dune.items.id = u.id`, ids, sizes)
+	}
+
+	// Batch insert new listings.
+	if len(pending) > 0 {
+		c, e2 := e.createListingsBatch(ctx, pending)
+		created += c
+		errs += e2
+	}
+
+	log.Printf("list-tick: %d created, %d topped up, %d pruned, %d errors", created, topped, pruned, errs)
+}
+
+// Tick runs both BuyTick and ListTick. Used for the initial run on startup.
+func (e *Exchange) Tick(ctx context.Context, catalog []CatalogItem) {
+	e.BuyTick(ctx)
+	e.ListTick(ctx, catalog)
 }
 
 func (e *Exchange) updatePrices(ctx context.Context, catalog []CatalogItem) {
