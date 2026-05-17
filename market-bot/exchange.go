@@ -109,11 +109,16 @@ func (e *Exchange) gameNow() int64 {
 }
 
 func (e *Exchange) Init(ctx context.Context, catalog []CatalogItem) error {
-	if err := e.db.QueryRow(ctx,
-		`SELECT id FROM dune.dune_exchanges WHERE exchange_name = 'HarkoVillage_EX' LIMIT 1`).Scan(&e.exchangeID); err != nil {
-		return fmt.Errorf("find HarkoVillage_EX exchange: %w", err)
+	err := e.db.QueryRow(ctx,
+		`SELECT exchange_id FROM dune.dune_exchange_orders WHERE is_npc_order = FALSE LIMIT 1`).Scan(&e.exchangeID)
+	if err != nil {
+		// No player orders yet — fall back to first non-Global exchange
+		if err2 := e.db.QueryRow(ctx,
+			`SELECT id FROM dune.dune_exchanges WHERE exchange_name != 'Global' ORDER BY id LIMIT 1`).Scan(&e.exchangeID); err2 != nil {
+			return fmt.Errorf("detect exchange id: %w", err2)
+		}
 	}
-	log.Printf("exchange id: %d (HarkoVillage_EX)", e.exchangeID)
+	log.Printf("exchange id: %d", e.exchangeID)
 
 	if err := e.db.QueryRow(ctx,
 		`SELECT DISTINCT access_point_id FROM dune.dune_exchange_orders WHERE exchange_id = $1 LIMIT 1`,
