@@ -67,12 +67,12 @@ var knownCodes = [4]map[string]byte{
 		"transportornithopter": 4,
 		"sandcrawler":          5,
 		// UTILITY: BUILDING TOOLS(0) DEPLOYABLES(1) HYDRATION TOOLS(2) GATHERING TOOLS(3) CARTOGRAPHY TOOLS(4) UTILITY TOOLS(5) CONSUMABLES(6)
-		"buildingtools":   0,
-		"hydrationtools":  2,
-		"gatheringtools":  3,
+		"buildingtools":    0,
+		"hydrationtools":   2,
+		"gatheringtools":   3,
 		"cartographytools": 4,
-		"utilitytools":    5,
-		"consumables":     6,
+		"utilitytools":     5,
+		"consumables":      6,
 		// AUGMENTATIONS: GARMENT/armor(0) MELEE(1) RANGED(2) GENERIC/misc(3)
 		"armor":  0,
 		"melee":  1,
@@ -151,11 +151,12 @@ var weaponPathRemap = map[string][2]byte{
 
 // uniqueSchematicsD2 is the depth-2 code for UNIQUE SCHEMATICS under each
 // depth-1 category. Confirmed from in-game UI screenshots (0-indexed position).
-//   GARMENTS:      LIGHT ARMOR(0) HEAVY ARMOR(1) STILLSUITS(2) UTILITY(3) SOCIAL(4) → UNIQUE SCHEMATICS(5)
-//   WEAPONS:       MELEE(0) RANGED(1) AMMUNITION(2) → UNIQUE SCHEMATICS(3)
-//   VEHICLES:      ONE MAN(0) FOUR MAN(1) LIGHT ORNITHOPTER(2) MEDIUM ORNITHOPTER(3) CARRY-ALL(4) SANDCRAWLER(5) → UNIQUE SCHEMATICS(6)
-//   UTILITY:       BUILDING TOOLS(0) DEPLOYABLES(1) HYDRATION(2) GATHERING(3) CARTOGRAPHY(4) UTILITY TOOLS(5) CONSUMABLES(6) → UNIQUE SCHEMATICS(7)
-//   AUGMENTATIONS: GARMENT(0) MELEE(1) RANGED(2) GENERIC(3) → UNIQUE SCHEMATICS(4)
+//
+//	GARMENTS:      LIGHT ARMOR(0) HEAVY ARMOR(1) STILLSUITS(2) UTILITY(3) SOCIAL(4) → UNIQUE SCHEMATICS(5)
+//	WEAPONS:       MELEE(0) RANGED(1) AMMUNITION(2) → UNIQUE SCHEMATICS(3)
+//	VEHICLES:      ONE MAN(0) FOUR MAN(1) LIGHT ORNITHOPTER(2) MEDIUM ORNITHOPTER(3) CARRY-ALL(4) SANDCRAWLER(5) → UNIQUE SCHEMATICS(6)
+//	UTILITY:       BUILDING TOOLS(0) DEPLOYABLES(1) HYDRATION(2) GATHERING(3) CARTOGRAPHY(4) UTILITY TOOLS(5) CONSUMABLES(6) → UNIQUE SCHEMATICS(7)
+//	AUGMENTATIONS: GARMENT(0) MELEE(1) RANGED(2) GENERIC(3) → UNIQUE SCHEMATICS(4)
 var uniqueSchematicsD2 = map[string]byte{
 	"garment":  5,
 	"weapons":  3,
@@ -200,15 +201,15 @@ var uniqueSchematicsD3 = map[string]byte{
 	"sandcrawler":          5,
 
 	// UTILITY/UNIQUE SCHEMATICS
-	"deployables":    0,
-	"watertools":     1,
-	"bloodtools":     2,
-	"cutteray":       3,
-	"staticcompactor": 4,
+	"deployables":      0,
+	"watertools":       1,
+	"bloodtools":       2,
+	"cutteray":         3,
+	"staticcompactor":  4,
 	"cartographytools": 5,
-	"shield":         6,
-	"suspensor":      7,
-	"powerpack":      8,
+	"shield":           6,
+	"suspensor":        7,
+	"powerpack":        8,
 
 	// AUGMENTATIONS/UNIQUE SCHEMATICS
 	"armor":  0,
@@ -439,6 +440,14 @@ func rarityMult(rarity string) float64 {
 func adjustPrice(item CatalogItem, currentPrice int64, soldFraction float64) int64 {
 	floor := roundPrice(basePrice(item))
 	ceiling := floor * 5
+
+	// Hard per-item overrides from item-data.json take precedence.
+	if item.MinPrice > 0 && floor < item.MinPrice {
+		floor = item.MinPrice
+	}
+	if item.MaxPrice > 0 && ceiling > item.MaxPrice {
+		ceiling = item.MaxPrice
+	}
 
 	var next int64
 	switch {

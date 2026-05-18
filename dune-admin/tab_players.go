@@ -29,6 +29,10 @@ const (
 	pvAwardXP
 	pvSQL
 	pvSQLResult
+	pvOnlineState
+	pvKickPlayer
+	pvDeleteItem
+	pvResetSpec
 )
 
 // PlayersState holds all state for the Players tab.
@@ -44,6 +48,8 @@ type PlayersState struct {
 	specs           []specTrack
 	sqlResult       string
 	scripCurrencyID int16
+	onlineState     []onlineStateRow
+	structureCounts map[int64]structureCount
 
 	tbl               table.Model
 	selectedPlayerIdx int
@@ -72,11 +78,15 @@ var menuItems = []menuItem{
 	{"Currency", pvCurrency},
 	{"Factions & Rep", pvFactions},
 	{"Specializations / XP", pvSpecializations},
+	{"Online State", pvOnlineState},
 	{"Give Item", pvGiveItem},
 	{"Give Currency", pvGiveCurrency},
 	{"Give Faction Rep", pvGiveFactionRep},
 	{"Give Landsraad Scrip", pvGiveLandsraadScrip},
 	{"Award XP", pvAwardXP},
+	{"Kick Player", pvKickPlayer},
+	{"Delete Item", pvDeleteItem},
+	{"Reset Spec", pvResetSpec},
 	{"SQL Query", pvSQL},
 	{"Quit", pvMenu},
 }
@@ -101,21 +111,29 @@ func rebuildPlayersTable(m model) model {
 			{Title: "Name", Width: 20},
 			{Title: "Class", Width: 18},
 			{Title: "Map", Width: 16},
-			{Title: "Faction", Width: 12},
+			{Title: "Faction", Width: 10},
+			{Title: "Bld/Tot", Width: 9},
 		}
-		fixed := 8 + 20 + 16 + 12 + 4*3
+		fixed := 8 + 20 + 16 + 10 + 9 + 5*3
 		extra := w - fixed - 2
 		if extra > 10 {
 			cols[2].Width = extra
 		}
 		var rows []table.Row
 		for _, p := range m.pl.players {
+			bldTot := "-"
+			if m.pl.structureCounts != nil {
+				if sc, ok := m.pl.structureCounts[p.AccountID]; ok {
+					bldTot = fmt.Sprintf("%d/%d", sc.Buildings, sc.Totems)
+				}
+			}
 			rows = append(rows, table.Row{
 				fmt.Sprintf("%d", p.ID),
 				p.Name,
 				p.Class,
 				p.Map,
 				factionDisplayName(p.FactionID),
+				bldTot,
 			})
 		}
 		m.pl.tbl = newTable(cols, rows, w, h, s)
@@ -220,6 +238,26 @@ func rebuildPlayersTable(m model) model {
 			rows = append(rows, table.Row{l})
 		}
 		m.pl.tbl = newTable(cols, rows, w, h, s)
+
+	case pvOnlineState:
+		cols := []table.Column{
+			{Title: "ID", Width: 10},
+			{Title: "Name", Width: 20},
+			{Title: "Status", Width: 12},
+			{Title: "Map", Width: 16},
+			{Title: "Last Seen (UTC)", Width: 22},
+		}
+		var rows []table.Row
+		for _, r := range m.pl.onlineState {
+			rows = append(rows, table.Row{
+				fmt.Sprintf("%d", r.PlayerID),
+				r.Name,
+				r.Status,
+				r.Map,
+				r.LastSeen,
+			})
+		}
+		m.pl.tbl = newTable(cols, rows, w, h, s)
 	}
 
 	return m
@@ -237,6 +275,18 @@ func playersUpdate(msg tea.Msg, m model) (model, tea.Cmd) {
 			m.pl.players = msg.rows
 			m.pl.view = pvPlayers
 			m = rebuildPlayersTable(m)
+		}
+		return m, nil
+
+	case msgInventoryBackground:
+		if msg.err == nil {
+			m.pl.inventory = msg.rows
+			// Rebuild the inventory table so it's ready to display as context in the
+			// Delete Item wizard step 2, without switching away from pvDeleteItem.
+			prev := m.pl.view
+			m.pl.view = pvInventory
+			m = rebuildPlayersTable(m)
+			m.pl.view = prev
 		}
 		return m, nil
 
@@ -282,6 +332,28 @@ func playersUpdate(msg tea.Msg, m model) (model, tea.Cmd) {
 			m.pl.specs = msg.rows
 			m.pl.view = pvSpecializations
 			m = rebuildPlayersTable(m)
+		}
+		return m, nil
+
+	case msgOnlineState:
+		if msg.err != nil {
+			m.statusMsg, m.statusIsOK = msg.err.Error(), false
+			m.pl.view = pvMenu
+		} else {
+			m.pl.onlineState = msg.rows
+			m.pl.view = pvOnlineState
+			m = rebuildPlayersTable(m)
+		}
+		return m, nil
+
+	case msgStructures:
+		if msg.err != nil {
+			m.statusMsg, m.statusIsOK = msg.err.Error(), false
+		} else {
+			m.pl.structureCounts = msg.counts
+			if m.pl.view == pvPlayers {
+				m = rebuildPlayersTable(m)
+			}
 		}
 		return m, nil
 
@@ -352,7 +424,7 @@ func playersHandleKey(msg tea.KeyPressMsg, m model) (model, tea.Cmd) {
 		m.pl.tbl, cmd = m.pl.tbl.Update(msg)
 		return m, cmd
 
-	case pvInventory, pvCurrency, pvFactions, pvSpecializations, pvSQLResult:
+	case pvInventory, pvCurrency, pvFactions, pvSpecializations, pvSQLResult, pvOnlineState:
 		var cmd tea.Cmd
 		m.pl.tbl, cmd = m.pl.tbl.Update(msg)
 		return m, cmd
@@ -374,7 +446,7 @@ func playersHandleMenuKey(k string, m model) (model, tea.Cmd) {
 	case "enter":
 		return playersActivateMenu(m)
 	case "r":
-		return m, tea.Cmd(cmdFetchPlayers)
+		return m, tea.Batch(tea.Cmd(cmdFetchPlayers), tea.Cmd(cmdFetchStructureCounts))
 	}
 	return m, nil
 }
@@ -387,7 +459,7 @@ func playersActivateMenu(m model) (model, tea.Cmd) {
 	}
 	switch menuItems[idx].view {
 	case pvPlayers:
-		return m, tea.Cmd(cmdFetchPlayers)
+		return m, tea.Batch(tea.Cmd(cmdFetchPlayers), tea.Cmd(cmdFetchStructureCounts))
 	case pvInventory:
 		return playersStartWizard(pvInventory, []inputStep{
 			{prompt: "Player name", hint: "type name, Tab to autocomplete"},
@@ -431,6 +503,22 @@ func playersActivateMenu(m model) (model, tea.Cmd) {
 		return playersStartWizard(pvSQL, []inputStep{
 			{prompt: "SQL", hint: "SELECT … (results capped at 200 rows)"},
 		}, m)
+	case pvOnlineState:
+		return m, func() tea.Msg { return cmdFetchOnlineState() }
+	case pvKickPlayer:
+		return playersStartWizard(pvKickPlayer, []inputStep{
+			{prompt: "Player name (or actor ID)", hint: "type name, Tab to autocomplete — sets status to LoggingOut, no data deleted"},
+		}, m)
+	case pvDeleteItem:
+		return playersStartWizard(pvDeleteItem, []inputStep{
+			{prompt: "Player name", hint: "type name, Tab to autocomplete — loads their inventory"},
+			{prompt: "Item ID", hint: "numeric item ID shown in the inventory table above"},
+		}, m)
+	case pvResetSpec:
+		return playersStartWizard(pvResetSpec, []inputStep{
+			{prompt: "Player name (or actor ID)", hint: "type name, Tab to autocomplete"},
+			{prompt: "Track to reset", hint: "Combat  Crafting  Gathering  Exploration  Sabotage  all"},
+		}, m)
 	}
 	return m, nil
 }
@@ -447,7 +535,8 @@ func playersStartWizard(target playerView, steps []inputStep, m model) (model, t
 
 func playersIsInputState(m model) bool {
 	switch m.pl.view {
-	case pvGiveItem, pvGiveCurrency, pvGiveFactionRep, pvGiveLandsraadScrip, pvAwardXP, pvSQL, pvInventory:
+	case pvGiveItem, pvGiveCurrency, pvGiveFactionRep, pvGiveLandsraadScrip, pvAwardXP, pvSQL, pvInventory,
+		pvKickPlayer, pvDeleteItem, pvResetSpec:
 		return len(m.pl.inputSteps) > 0 && m.pl.inputCursor < len(m.pl.inputSteps)
 	}
 	return false
@@ -492,6 +581,14 @@ func playersHandleInputKey(msg tea.KeyPressMsg, m model) (model, tea.Cmd) {
 			m.pl.textInput.SetValue("0")
 		} else {
 			m.pl.textInput.SetValue("")
+		}
+		// For Delete Item step 0→1: fetch the player's inventory so it's
+		// visible as context while the admin types the item ID.
+		if m.pl.view == pvDeleteItem && m.pl.inputCursor == 1 {
+			playerID := lookupPawnIDFromPlayers(m.pl.players, m.pl.inputSteps[0].value)
+			if playerID > 0 {
+				return m, tea.Batch(textinput.Blink, cmdFetchInventoryBackground(playerID))
+			}
 		}
 		return m, textinput.Blink
 	}
@@ -582,6 +679,22 @@ func playersExecuteWizard(m model) (model, tea.Cmd) {
 	case pvSQL:
 		sql := strings.TrimSpace(vals[0].value)
 		return m, cmdRunSQL(sql)
+
+	case pvKickPlayer:
+		playerID := lookupPawnID(vals[0].value)
+		m.pl.view = pvMenu
+		return m, cmdKickPlayer(playerID)
+
+	case pvDeleteItem:
+		itemID := parseInt(vals[1].value, 0)
+		m.pl.view = pvMenu
+		return m, cmdDeleteItem(itemID)
+
+	case pvResetSpec:
+		playerID := lookupPawnID(vals[0].value)
+		trackType := strings.TrimSpace(vals[1].value)
+		m.pl.view = pvMenu
+		return m, cmdResetSpecializations(playerID, trackType)
 	}
 
 	m.pl.view = pvMenu
@@ -686,11 +799,34 @@ func renderPlayersContentPane(m model, w, h int) string {
 		title = " SQL Result "
 		body = m.pl.tbl.View()
 
-	case pvGiveItem, pvGiveCurrency, pvGiveFactionRep, pvGiveLandsraadScrip, pvAwardXP, pvSQL:
+	case pvOnlineState:
+		title = fmt.Sprintf(" Online State (%d players) ", len(m.pl.onlineState))
+		body = m.pl.tbl.View()
+
+	case pvGiveItem, pvGiveCurrency, pvGiveFactionRep, pvGiveLandsraadScrip, pvAwardXP, pvSQL,
+		pvKickPlayer, pvResetSpec:
 		if len(m.pl.inputSteps) > 0 && m.pl.inputCursor < len(m.pl.inputSteps) {
 			step := m.pl.inputSteps[m.pl.inputCursor]
 			title = fmt.Sprintf(" %s  [step %d/%d] ", wizardTitlePV(m.pl.view), m.pl.inputCursor+1, len(m.pl.inputSteps))
 			body = renderPlayersWizardStep(m, step, innerW, inner)
+		}
+
+	case pvDeleteItem:
+		if len(m.pl.inputSteps) > 0 && m.pl.inputCursor < len(m.pl.inputSteps) {
+			step := m.pl.inputSteps[m.pl.inputCursor]
+			title = fmt.Sprintf(" Delete Item  [step %d/%d] ", m.pl.inputCursor+1, len(m.pl.inputSteps))
+			if m.pl.inputCursor == 1 && len(m.pl.inventory) > 0 {
+				// Step 2: show inventory table as context, wizard input below.
+				tblLines := strings.Split(m.pl.tbl.View(), "\n")
+				maxTblLines := inner/2 - 1
+				if len(tblLines) > maxTblLines {
+					tblLines = tblLines[:maxTblLines]
+				}
+				wizBody := renderPlayersWizardStep(m, step, innerW, inner-len(tblLines)-1)
+				body = strings.Join(tblLines, "\n") + "\n" + wizBody
+			} else {
+				body = renderPlayersWizardStep(m, step, innerW, inner)
+			}
 		}
 	}
 
@@ -725,6 +861,10 @@ func renderPlayersWelcome(m model, w, h int) string {
 		styleDim.Render("  │  Faction Rep   · adjust per-faction scrips  │"),
 		styleDim.Render("  │  Landsraad     · add scrip to current house │"),
 		styleDim.Render("  │  Award XP      · add XP to any skill track  │"),
+		styleDim.Render("  │  Online State  · who is online / last seen  │"),
+		styleDim.Render("  │  Kick Player   · set LoggingOut, no data lost  │"),
+		styleDim.Render("  │  Delete Item   · remove item by ID          │"),
+		styleDim.Render("  │  Reset Spec    · clear XP tracks/keystones  │"),
 		styleDim.Render("  │  SQL           · free-form query            │"),
 		styleDim.Render("  ╰────────────────────────────────────────────╯"),
 	}
@@ -783,6 +923,34 @@ func renderPlayersWizardStep(m model, step inputStep, w, h int) string {
 }
 
 // ── item search helpers ───────────────────────────────────────────────────────
+
+// lookupPawnIDFromPlayers resolves a player name (or raw ID string) to a pawn actor ID.
+func lookupPawnIDFromPlayers(players []playerInfo, name string) int64 {
+	name = strings.TrimSpace(name)
+	for _, p := range players {
+		if strings.EqualFold(p.Name, name) {
+			return p.ID
+		}
+	}
+	v, _ := strconv.ParseInt(name, 10, 64)
+	return v
+}
+
+// cmdFetchInventoryBackground fetches inventory for a player without changing the
+// active view — used so Delete Item can show the inventory table as context on step 2.
+func cmdFetchInventoryBackground(playerID int64) tea.Cmd {
+	return func() tea.Msg {
+		msg := cmdFetchInventory(playerID)()
+		if inv, ok := msg.(msgInventory); ok {
+			return msgInventoryBackground(inv)
+		}
+		return msg
+	}
+}
+
+// msgInventoryBackground wraps a msgInventory so the update handler can populate
+// m.pl.inventory without switching views.
+type msgInventoryBackground msgInventory
 
 // itemSuggestions returns up to n template_ids whose template prefix OR display
 // name contains cur (case-insensitive). Template-prefix matches come first.
@@ -888,6 +1056,12 @@ func wizardTitlePV(s playerView) string {
 		return "SQL Query"
 	case pvInventory:
 		return "View Inventory"
+	case pvKickPlayer:
+		return "Kick Player"
+	case pvDeleteItem:
+		return "Delete Item"
+	case pvResetSpec:
+		return "Reset Specialization"
 	default:
 		return "Input"
 	}
@@ -895,7 +1069,7 @@ func wizardTitlePV(s playerView) string {
 
 func isPlayersTableState(s playerView) bool {
 	switch s {
-	case pvPlayers, pvInventory, pvCurrency, pvFactions, pvSpecializations, pvSQLResult:
+	case pvPlayers, pvInventory, pvCurrency, pvFactions, pvSpecializations, pvSQLResult, pvOnlineState:
 		return true
 	}
 	return false

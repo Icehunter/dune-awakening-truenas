@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	tea "charm.land/bubbletea/v2"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
@@ -442,24 +443,26 @@ func cmdGiveCurrency(playerID int64, amount int64) tea.Cmd {
 		if globalDB == nil {
 			return msgMutate{err: fmt.Errorf("not connected")}
 		}
-		res, err := globalDB.Exec(context.Background(), `
-			UPDATE dune.player_virtual_currency_balances
-			SET balance = balance + $1
-			WHERE player_controller_id = $2 AND currency_id = 0`,
-			amount, playerID)
+		if playerID == 0 {
+			return msgMutate{err: fmt.Errorf("player ID required")}
+		}
+		ctx := context.Background()
+		// Route through adjust_player_virtual_currency_balance for audit logging
+		// and negative-balance guards. currency_id=0 is Solaris.
+		_, err := globalDB.Exec(ctx, `
+			SELECT dune.adjust_player_virtual_currency_balance($1, 0, $2)`,
+			playerID, amount)
 		if err != nil {
 			return msgMutate{err: err}
 		}
-		if res.RowsAffected() == 0 {
-			_, err = globalDB.Exec(context.Background(), `
-				INSERT INTO dune.player_virtual_currency_balances
-				(player_controller_id, currency_id, balance)
-				VALUES ($1, 0, $2)`, playerID, amount)
-			if err != nil {
-				return msgMutate{err: err}
-			}
-		}
-		return msgMutate{ok: fmt.Sprintf("Added %d Solaris to player %d", amount, playerID)}
+		var balance int64
+		_ = globalDB.QueryRow(ctx, `
+			SELECT balance FROM dune.player_virtual_currency_balances
+			WHERE player_controller_id = $1 AND currency_id = 0`,
+			playerID).Scan(&balance)
+		return msgMutate{ok: fmt.Sprintf(
+			"Added %d Solaris to player %d — new balance %d",
+			amount, playerID, balance)}
 	}
 }
 
@@ -526,6 +529,189 @@ func cmdAwardXP(playerID int64, trackType string, delta int32) tea.Cmd {
 		}
 		return msgMutate{ok: fmt.Sprintf("Awarded %d XP (%s) to player %d", delta, trackType, playerID)}
 	}
+}
+
+func cmdKickPlayer(playerID int64) tea.Cmd {
+	return func() tea.Msg {
+		if globalDB == nil {
+			return msgMutate{err: fmt.Errorf("not connected")}
+		}
+		if playerID == 0 {
+			return msgMutate{err: fmt.Errorf("player ID required")}
+		}
+		ctx := context.Background()
+
+		// Set online_status to LoggingOut on the player_state row.
+		// The server reads this on its next heartbeat and disconnects the session
+		// without touching any game data (inventory, buildings, etc. are untouched).
+		res, err := globalDB.Exec(ctx, `
+			UPDATE dune.player_state
+			SET online_status = 'LoggingOut'
+			WHERE player_controller_id = $1`, playerID)
+		if err != nil {
+			return msgMutate{err: fmt.Errorf("kick: %w", err)}
+		}
+		if res.RowsAffected() == 0 {
+			return msgMutate{err: fmt.Errorf("no player_state found for actor %d", playerID)}
+		}
+		return msgMutate{ok: fmt.Sprintf("Set actor %d → LoggingOut — server will disconnect on next heartbeat", playerID)}
+	}
+}
+
+func cmdDeleteItem(itemID int64) tea.Cmd {
+	return func() tea.Msg {
+		if globalDB == nil {
+			return msgMutate{err: fmt.Errorf("not connected")}
+		}
+		if itemID == 0 {
+			return msgMutate{err: fmt.Errorf("item ID required")}
+		}
+		ctx := context.Background()
+		res, err := globalDB.Exec(ctx, `DELETE FROM dune.items WHERE id = $1`, itemID)
+		if err != nil {
+			return msgMutate{err: fmt.Errorf("delete item: %w", err)}
+		}
+		if res.RowsAffected() == 0 {
+			return msgMutate{err: fmt.Errorf("item %d not found", itemID)}
+		}
+		return msgMutate{ok: fmt.Sprintf("Deleted item %d", itemID)}
+	}
+}
+
+func cmdResetSpecializations(playerID int64, trackType string) tea.Cmd {
+	return func() tea.Msg {
+		if globalDB == nil {
+			return msgMutate{err: fmt.Errorf("not connected")}
+		}
+		if playerID == 0 {
+			return msgMutate{err: fmt.Errorf("player ID required")}
+		}
+		ctx := context.Background()
+
+		var tracksDeleted, keystonesDeleted int64
+		if trackType == "" || strings.EqualFold(trackType, "all") {
+			res, err := globalDB.Exec(ctx,
+				`DELETE FROM dune.specialization_tracks WHERE player_id = $1`, playerID)
+			if err != nil {
+				return msgMutate{err: fmt.Errorf("reset tracks: %w", err)}
+			}
+			tracksDeleted = res.RowsAffected()
+
+			res, err = globalDB.Exec(ctx,
+				`DELETE FROM dune.purchased_specialization_keystones WHERE player_id = $1`, playerID)
+			if err != nil {
+				return msgMutate{err: fmt.Errorf("reset keystones: %w", err)}
+			}
+			keystonesDeleted = res.RowsAffected()
+		} else {
+			res, err := globalDB.Exec(ctx, `
+				DELETE FROM dune.specialization_tracks
+				WHERE player_id = $1 AND track_type::text = $2`, playerID, trackType)
+			if err != nil {
+				return msgMutate{err: fmt.Errorf("reset track: %w", err)}
+			}
+			tracksDeleted = res.RowsAffected()
+		}
+
+		if trackType == "" || strings.EqualFold(trackType, "all") {
+			return msgMutate{ok: fmt.Sprintf(
+				"Reset player %d: %d track(s) + %d keystone(s) cleared",
+				playerID, tracksDeleted, keystonesDeleted)}
+		}
+		return msgMutate{ok: fmt.Sprintf(
+			"Reset %s track for player %d (%d row(s) cleared)", trackType, playerID, tracksDeleted)}
+	}
+}
+
+// onlineStateRow holds a single row from the player online state query.
+type onlineStateRow struct {
+	PlayerID int64
+	Name     string
+	Map      string
+	Status   string
+	LastSeen string
+}
+
+type msgOnlineState struct {
+	rows []onlineStateRow
+	err  error
+}
+
+func cmdFetchOnlineState() tea.Msg {
+	if globalDB == nil {
+		return msgOnlineState{err: fmt.Errorf("not connected")}
+	}
+	rows, err := globalDB.Query(context.Background(), `
+		SELECT ps.player_controller_id,
+		       COALESCE(ps.character_name, ''),
+		       COALESCE(a.map, ''),
+		       ps.online_status::text,
+		       COALESCE(to_char(ps.last_avatar_activity AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS'), '')
+		FROM dune.player_state ps
+		LEFT JOIN dune.actors a ON a.id = ps.player_controller_id
+		ORDER BY ps.online_status DESC, ps.last_avatar_activity DESC`)
+	if err != nil {
+		return msgOnlineState{err: err}
+	}
+	defer rows.Close()
+
+	var out []onlineStateRow
+	for rows.Next() {
+		var r onlineStateRow
+		if err := rows.Scan(&r.PlayerID, &r.Name, &r.Map, &r.Status, &r.LastSeen); err != nil {
+			continue
+		}
+		out = append(out, r)
+	}
+	if err := rows.Err(); err != nil {
+		return msgOnlineState{err: err}
+	}
+	return msgOnlineState{rows: out}
+}
+
+// structureCount holds building + totem counts for a player.
+type structureCount struct {
+	PlayerAccountID int64
+	Buildings       int64
+	Totems          int64
+}
+
+type msgStructures struct {
+	counts map[int64]structureCount
+	err    error
+}
+
+func cmdFetchStructureCounts() tea.Msg {
+	if globalDB == nil {
+		return msgStructures{err: fmt.Errorf("not connected")}
+	}
+	rows, err := globalDB.Query(context.Background(), `
+		SELECT a.owner_account_id,
+		       SUM(CASE WHEN b.id IS NOT NULL THEN 1 ELSE 0 END) AS buildings,
+		       SUM(CASE WHEN t.id IS NOT NULL THEN 1 ELSE 0 END) AS totems
+		FROM dune.actors a
+		LEFT JOIN dune.buildings b ON b.id = a.id
+		LEFT JOIN dune.totems t ON t.id = a.id
+		WHERE a.owner_account_id IS NOT NULL
+		  AND (b.id IS NOT NULL OR t.id IS NOT NULL)
+		GROUP BY a.owner_account_id`)
+	if err != nil {
+		return msgStructures{err: err}
+	}
+	defer rows.Close()
+
+	counts := make(map[int64]structureCount)
+	for rows.Next() {
+		var accountID, bld, tot int64
+		if err := rows.Scan(&accountID, &bld, &tot); err != nil {
+			continue
+		}
+		counts[accountID] = structureCount{accountID, bld, tot}
+	}
+	if err := rows.Err(); err != nil {
+		return msgStructures{err: err}
+	}
+	return msgStructures{counts: counts}
 }
 
 // ── private helpers ───────────────────────────────────────────────────────────
@@ -640,60 +826,31 @@ func resolveScripCurrencyID(ctx context.Context) (int16, error) {
 }
 
 func applyFactionRepDelta(ctx context.Context, actorID int64, factionID int16, delta int32) msgMutate {
-	// Upsert reputation.
-	res, err := globalDB.Exec(ctx, `
-		UPDATE dune.player_faction_reputation
-		SET reputation_amount = reputation_amount + $1
-		WHERE actor_id = $2 AND faction_id = $3`,
-		delta, actorID, factionID)
-	if err != nil {
-		return msgMutate{err: err}
-	}
-	if res.RowsAffected() == 0 {
-		_, err = globalDB.Exec(ctx, `
-			INSERT INTO dune.player_faction_reputation (actor_id, faction_id, reputation_amount)
-			VALUES ($1, $2, $3)`, actorID, factionID, delta)
-		if err != nil {
-			return msgMutate{err: err}
-		}
-	}
-
-	// Read the new total.
-	var newTotal int32
+	// Route through set_player_faction_reputation which handles tier tags correctly.
+	// First get current rep to compute the new absolute value.
+	var currentRep int32
 	_ = globalDB.QueryRow(ctx, `
-		SELECT reputation_amount FROM dune.player_faction_reputation
-		WHERE actor_id = $1 AND faction_id = $2`, actorID, factionID).Scan(&newTotal)
+		SELECT COALESCE(reputation_amount, 0) FROM dune.player_faction_reputation
+		WHERE actor_id = $1 AND faction_id = $2`, actorID, factionID).Scan(&currentRep)
 
-	// Sync faction tier tags in player_tags.
-	// Tags are keyed to account_id, looked up from the actor's owner.
-	var accountID int64
-	err = globalDB.QueryRow(ctx,
-		`SELECT owner_account_id FROM dune.actors WHERE id = $1`, actorID).Scan(&accountID)
-	if err == nil && accountID > 0 {
-		fName := factionTagName(factionID)
-		if fName != "" {
-			syncFactionTierTags(ctx, accountID, fName, newTotal)
-		}
+	newRep := currentRep + delta
+	if newRep < 0 {
+		newRep = 0
+	}
+
+	// set_player_faction_reputation(actor_id, faction_id, new_reputation) handles
+	// both the reputation update and tier tag synchronization server-side.
+	_, err := globalDB.Exec(ctx, `
+		SELECT dune.set_player_faction_reputation($1, $2, $3)`,
+		actorID, factionID, newRep)
+	if err != nil {
+		return msgMutate{err: fmt.Errorf("set_player_faction_reputation: %w", err)}
 	}
 
 	fName := factionDisplayName(factionID)
 	return msgMutate{ok: fmt.Sprintf(
-		"Set %s scrips to %d (delta %+d) for actor %d — tier tags synced",
-		fName, newTotal, delta, actorID)}
-}
-
-// factionTagName returns the game tag prefix for a faction (e.g. "Atreides").
-func factionTagName(id int16) string {
-	switch id {
-	case 1:
-		return "Atreides"
-	case 2:
-		return "Harkonnen"
-	case 4:
-		return "Smuggler"
-	default:
-		return ""
-	}
+		"Set %s rep to %d (was %d, delta %+d) for actor %d — tier tags synced by server",
+		fName, newRep, currentRep, delta, actorID)}
 }
 
 func factionDisplayName(id int16) string {
@@ -708,34 +865,6 @@ func factionDisplayName(id int16) string {
 		return "Smuggler"
 	default:
 		return fmt.Sprintf("Faction%d", id)
-	}
-}
-
-// factionTierThresholds maps tier number to minimum reputation required.
-// Observed from player_tags (Tier0–Tier5 all present at 11975 rep).
-// Thresholds are estimates based on typical Dune Awakening faction rank design;
-// the server re-evaluates on login, so over-granting is safe.
-var factionTierThresholds = []int32{0, 2000, 5000, 9000, 14000, 20000}
-
-// syncFactionTierTags inserts any tier tags the player should have based on
-// their current reputation, and removes any they shouldn't have.
-func syncFactionTierTags(ctx context.Context, accountID int64, faction string, rep int32) {
-	if globalDB == nil {
-		return
-	}
-	for tier, threshold := range factionTierThresholds {
-		tag := fmt.Sprintf("Faction.%s.Tier%d", faction, tier)
-		if rep >= threshold {
-			// INSERT OR IGNORE equivalent
-			globalDB.Exec(ctx, `
-				INSERT INTO dune.player_tags (account_id, tag)
-				VALUES ($1, $2)
-				ON CONFLICT DO NOTHING`, accountID, tag)
-		} else {
-			globalDB.Exec(ctx, `
-				DELETE FROM dune.player_tags WHERE account_id = $1 AND tag = $2`,
-				accountID, tag)
-		}
 	}
 }
 
@@ -854,9 +983,11 @@ func cmdSampleTable(tbl string, limit int) tea.Cmd {
 		if globalDB == nil {
 			return msgSample{err: fmt.Errorf("not connected")}
 		}
-		// tbl comes from pg_stat_user_tables (server-side), not raw user input
+		// Sanitize table name defensively even though tbl comes from pg_stat_user_tables.
+		// pgx.Identifier handles quoting and escaping to prevent SQL injection.
+		safeTable := pgx.Identifier{dbSchema, tbl}.Sanitize()
 		rows, err := globalDB.Query(context.Background(),
-			fmt.Sprintf("SELECT * FROM %s.%s LIMIT %d", dbSchema, tbl, limit))
+			fmt.Sprintf("SELECT * FROM %s LIMIT %d", safeTable, limit))
 		if err != nil {
 			return msgSample{table: tbl, err: err}
 		}

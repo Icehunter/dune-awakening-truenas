@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"os/signal"
+	"syscall"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -22,6 +24,7 @@ var (
 	flagListInterval = flag.Duration("listinterval", 30*time.Minute, "how often to restock/prune bot listings")
 	flagBuyThreshold = flag.Float64("buythreshold", 1.05, "buy player listings at or below this multiple of the bot's sell price (0 = disable buying)")
 	flagMaxBuys      = flag.Int("maxbuys", 50, "max player listings to purchase per tick")
+	flagReport       = flag.Bool("report", false, "print per-item sales analytics as TSV and exit (does not run the bot loop)")
 )
 
 func minDuration(a, b time.Duration) time.Duration {
@@ -43,7 +46,8 @@ func main() {
 	log.SetFlags(log.Ldate | log.Ltime | log.Lmsgprefix)
 	log.SetPrefix("market-bot ")
 
-	ctx := context.Background()
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
 
 	connStr := fmt.Sprintf(
 		"host=%s port=%d user=%s password=%s dbname=%s sslmode=disable",
@@ -80,6 +84,12 @@ func main() {
 	}
 	log.Println("exchange ready")
 
+	// Report mode: print analytics and exit without running the bot loop.
+	if *flagReport {
+		runReport(ctx, pool, ex, catalog)
+		return
+	}
+
 	// Run both immediately on start.
 	ex.Tick(ctx, catalog)
 
@@ -87,14 +97,20 @@ func main() {
 	defer tick.Stop()
 	nextBuy := time.Now().Add(*flagBuyInterval)
 	nextList := time.Now().Add(*flagListInterval)
-	for now := range tick.C {
-		if now.After(nextBuy) {
-			ex.BuyTick(ctx)
-			nextBuy = now.Add(*flagBuyInterval)
-		}
-		if now.After(nextList) {
-			ex.ListTick(ctx, catalog)
-			nextList = now.Add(*flagListInterval)
+	for {
+		select {
+		case <-ctx.Done():
+			log.Println("shutting down (signal received)")
+			return
+		case now := <-tick.C:
+			if now.After(nextBuy) {
+				ex.BuyTick(ctx)
+				nextBuy = now.Add(*flagBuyInterval)
+			}
+			if now.After(nextList) {
+				ex.ListTick(ctx, catalog)
+				nextList = now.Add(*flagListInterval)
+			}
 		}
 	}
 }

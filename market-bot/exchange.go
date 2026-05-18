@@ -65,11 +65,19 @@ type Exchange struct {
 	exchangeID    int64
 	accessPointID int64
 	prices        map[string]int64
+	marketPrices  map[string]marketPrice // real market prices from dune_exchange_get_item_price_stats
 	categories    map[string]categoryEntry
-	gameEpochUnix int64 // unix timestamp of the game server's time epoch; 0 = unknown
-	nextPos       int64 // position_index counter for item inserts
+	catalogMap    map[string]CatalogItem // template_id → catalog entry (for buyable check)
+	gameEpochUnix int64                  // unix timestamp of the game server's time epoch; 0 = unknown
+	nextPos       int64                  // position_index counter for item inserts
 	buyThreshold  float64
 	maxBuys       int
+}
+
+// marketPrice holds real market stats from dune_exchange_get_item_price_stats.
+type marketPrice struct {
+	minimum int64
+	average int64
 }
 
 func NewExchange(db *pgxpool.Pool, cachePath string, catalog []CatalogItem) (*Exchange, error) {
@@ -172,6 +180,12 @@ func (e *Exchange) Init(ctx context.Context, catalog []CatalogItem) error {
 		e.prices[item.TemplateID] = item.ListPrice
 	}
 
+	// Build catalog map for buyable checks.
+	e.catalogMap = make(map[string]CatalogItem, len(catalog))
+	for _, item := range catalog {
+		e.catalogMap[item.TemplateID] = item
+	}
+
 	// Start position counter after existing items.
 	e.db.QueryRow(ctx,
 		`SELECT COALESCE(MAX(position_index), -1) + 1 FROM dune.items WHERE inventory_id = $1`,
@@ -190,9 +204,14 @@ func (e *Exchange) initBotUser(ctx context.Context) error {
 	err := e.db.QueryRow(ctx,
 		`SELECT id FROM dune.actors WHERE class = 'Revy' LIMIT 1`).Scan(&e.ownerID)
 	if err == pgx.ErrNoRows {
+		// Get a valid partition_id so the bot actor is visible to admin lookups
+		// and won't be orphaned by partition cleanup.
+		var partitionID int64
+		_ = e.db.QueryRow(ctx,
+			`SELECT id FROM dune.partition_definition ORDER BY id LIMIT 1`).Scan(&partitionID)
 		err = e.db.QueryRow(ctx,
-			`INSERT INTO dune.actors (class, serial, gas_attributes, properties, dimension_index)
-			 VALUES ('Revy', 0, '{}', '{}', 0) RETURNING id`).Scan(&e.ownerID)
+			`INSERT INTO dune.actors (class, serial, gas_attributes, properties, dimension_index, partition_id)
+			 VALUES ('Revy', 0, '{}', '{}', 0, $1) RETURNING id`, partitionID).Scan(&e.ownerID)
 	}
 	if err != nil {
 		return fmt.Errorf("bot actor: %w", err)
@@ -204,10 +223,26 @@ func (e *Exchange) initBotUser(ctx context.Context) error {
 		`SELECT dune.dune_exchange_get_user_id($1)`, e.ownerID).Scan(&userID); err != nil {
 		return err
 	}
-	_, err = e.db.Exec(ctx,
-		`SELECT dune.dune_exchange_modify_user_solari_balance($1, $2)`,
-		e.ownerID, int64(9_000_000_000_000))
-	return err
+
+	// Check current balance before seeding — dune_exchange_modify_user_solari_balance
+	// adds a delta, not sets an absolute. Only seed if below a reasonable floor.
+	const seedFloor int64 = 1_000_000_000_000  // 1T
+	const seedAmount int64 = 9_000_000_000_000 // 9T
+	var currentBalance int64
+	_ = e.db.QueryRow(ctx,
+		`SELECT dune.dune_exchange_retrieve_solari_balance($1)`, e.ownerID).Scan(&currentBalance)
+	if currentBalance < seedFloor {
+		_, err = e.db.Exec(ctx,
+			`SELECT dune.dune_exchange_modify_user_solari_balance($1, $2)`,
+			e.ownerID, seedAmount-currentBalance) // top up to 9T
+		if err != nil {
+			return err
+		}
+		log.Printf("seeded bot balance: %d → %d", currentBalance, seedAmount)
+	} else {
+		log.Printf("bot balance OK: %d (floor %d)", currentBalance, seedFloor)
+	}
+	return nil
 }
 
 func (e *Exchange) poisonCategoryHash(ctx context.Context) error {
@@ -346,6 +381,13 @@ func (e *Exchange) buyPlayerListings(ctx context.Context, orderExpiry int64) {
 			skippedUnknown++
 			continue
 		}
+
+		// Skip items the operator has marked as non-buyable.
+		if item, ok := e.catalogMap[tmpl]; ok && !item.Buyable {
+			skippedUnknown++
+			continue
+		}
+
 		refPrice := gradedPrice(botPrice, grade)
 		if price > int64(float64(refPrice)*e.buyThreshold) {
 			log.Printf("buy: skip %s price=%d ref=%d(grade%d) threshold=%.2f", tmpl, price, refPrice, grade, e.buyThreshold)
@@ -576,7 +618,9 @@ func (e *Exchange) BuyTick(ctx context.Context) {
 func (e *Exchange) ListTick(ctx context.Context, catalog []CatalogItem) {
 	e.learnGameEpoch(ctx)
 	e.refreshCategoryCache(ctx)
+	e.fetchMarketPrices(ctx, catalog) // fetch real market prices via proc
 	e.updatePrices(ctx, catalog)
+	e.expireAndPurgeOrders(ctx) // use server procs for expiration
 
 	gameNow := e.gameNow()
 	var orderExpiry int64
@@ -745,6 +789,82 @@ func (e *Exchange) updatePrices(ctx context.Context, catalog []CatalogItem) {
 		if listed > 0 {
 			frac = float64(sold) / float64(listed)
 		}
-		e.prices[tmpl] = adjustPrice(item, current, frac)
+		adjusted := adjustPrice(item, current, frac)
+
+		// Factor in real market prices: if players are undercutting us significantly,
+		// consider lowering our price toward the market minimum.
+		if mp, ok := e.marketPrices[tmpl]; ok && mp.minimum > 0 {
+			// If market min is below our adjusted price by >10%, move toward it.
+			if mp.minimum < int64(float64(adjusted)*0.9) {
+				// Don't go below our floor, but trend toward market.
+				adjusted = (adjusted + mp.minimum) / 2
+			}
+		}
+
+		e.prices[tmpl] = adjusted
+	}
+}
+
+// fetchMarketPrices uses dune_exchange_get_item_price_stats to get real market
+// prices (minimum and weighted average) across ALL active listings, not just bot's.
+func (e *Exchange) fetchMarketPrices(ctx context.Context, catalog []CatalogItem) {
+	if len(catalog) == 0 {
+		return
+	}
+
+	// Collect all template IDs.
+	templateIDs := make([]string, 0, len(catalog))
+	for _, item := range catalog {
+		templateIDs = append(templateIDs, item.TemplateID)
+	}
+
+	rows, err := e.db.Query(ctx,
+		`SELECT * FROM dune.dune_exchange_get_item_price_stats($1)`, templateIDs)
+	if err != nil {
+		log.Printf("market price stats: %v", err)
+		return
+	}
+	defer rows.Close()
+
+	if e.marketPrices == nil {
+		e.marketPrices = make(map[string]marketPrice)
+	}
+
+	count := 0
+	for rows.Next() {
+		var tmpl string
+		var minPrice, avgPrice int64
+		if err := rows.Scan(&tmpl, &minPrice, &avgPrice); err != nil {
+			continue
+		}
+		e.marketPrices[tmpl] = marketPrice{minimum: minPrice, average: avgPrice}
+		count++
+	}
+	log.Printf("market prices: fetched %d items from real market", count)
+}
+
+// expireAndPurgeOrders uses server procs to expire and purge old orders.
+func (e *Exchange) expireAndPurgeOrders(ctx context.Context) {
+	now := e.gameNow()
+	if now <= 0 {
+		return // game epoch not learned yet
+	}
+
+	// Expire old sell orders. completion_type=2 = expired.
+	// purge_time = now + 7 days (when fulfilled orders get deleted).
+	purgeTime := now + 7*24*3600
+	_, err := e.db.Exec(ctx,
+		`SELECT * FROM dune.dune_exchange_expire_orders($1, $2, $3, 2)`,
+		e.exchangeID, now, purgeTime)
+	if err != nil {
+		log.Printf("expire orders: %v", err)
+	}
+
+	// Purge completed/expired orders past their purge time.
+	_, err = e.db.Exec(ctx,
+		`SELECT * FROM dune.dune_exchange_purge_completed_orders($1, $2)`,
+		e.exchangeID, now)
+	if err != nil {
+		log.Printf("purge orders: %v", err)
 	}
 }

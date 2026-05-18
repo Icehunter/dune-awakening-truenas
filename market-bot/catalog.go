@@ -8,36 +8,42 @@ import (
 )
 
 type CatalogItem struct {
-	TemplateID   string
-	DisplayName  string
-	StackMax     int64
-	Volume       float64
-	Tier         int
-	Rarity       string
-	BasePrice    int64
-	Category     string // e.g. "items/misc/refinedresources"
-	ListPrice    int64
+	TemplateID           string
+	DisplayName          string
+	StackMax             int64
+	Volume               float64
+	Tier                 int
+	Rarity               string
+	BasePrice            int64
+	Category             string // e.g. "items/misc/refinedresources"
+	ListPrice            int64
 	IsSchematic          bool
 	MaterialCost         int64
 	MaterialCostPerGrade [6]int64
 	IsGradeable          bool
 	MinQualityLevel      int
+	MinPrice             int64 // hard floor override (0 = no override)
+	MaxPrice             int64 // hard ceiling override (0 = no override)
+	Buyable              bool  // if false, skip buying player listings of this item
 }
 
 type itemDataEntry struct {
-	Name         string  `json:"name"`
-	StackMax     int64   `json:"stack_max"`
-	Volume       float64 `json:"volume"`
-	Tier         int     `json:"tier"`
-	Rarity       string  `json:"rarity"`
-	BasePrice    int64   `json:"vendor_price"`
-	Category     string  `json:"category"`
-	Tradeable    *bool   `json:"tradeable"`
+	Name                 string   `json:"name"`
+	StackMax             int64    `json:"stack_max"`
+	Volume               float64  `json:"volume"`
+	Tier                 int      `json:"tier"`
+	Rarity               string   `json:"rarity"`
+	BasePrice            int64    `json:"vendor_price"`
+	Category             string   `json:"category"`
+	Tradeable            *bool    `json:"tradeable"`
 	IsSchematic          bool     `json:"is_schematic"`
 	MaterialCost         int64    `json:"material_cost"`
 	MaterialCostPerGrade [6]int64 `json:"material_cost_per_grade"`
 	IsGradeable          bool     `json:"is_gradeable"`
 	MinQualityLevel      int      `json:"min_quality_level"`
+	MinPrice             int64    `json:"min_price"`
+	MaxPrice             int64    `json:"max_price"`
+	Buyable              *bool    `json:"buyable"`
 }
 
 type itemDataFile struct {
@@ -92,6 +98,9 @@ func loadCatalog() ([]CatalogItem, error) {
 			MaterialCostPerGrade: d.MaterialCostPerGrade,
 			IsGradeable:          d.IsGradeable,
 			MinQualityLevel:      d.MinQualityLevel,
+			MinPrice:             d.MinPrice,
+			MaxPrice:             d.MaxPrice,
+			Buyable:              d.Buyable == nil || *d.Buyable, // default true
 		}
 		item.ListPrice = computePrice(item)
 		catalog = append(catalog, item)
