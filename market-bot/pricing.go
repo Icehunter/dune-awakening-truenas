@@ -57,8 +57,22 @@ var knownCodes = [4]map[string]byte{
 		"stillsuits":       2,
 		"utilitywearables": 3,
 		"socialwearables":  4,
-		// WEAPONS: MELEE(0) RANGED(1) AMMUNITION(2)
-		"ammunition": 2,
+		// WEAPONS: MELEE(0) individual-type codes (depth-2), AMMUNITION(2)
+		// Ranged weapon item types — codes confirmed from UniqueSchematicsMask ordering
+		// (same positional order used for both item depth-2 and schematic depth-3).
+		"pistol":          2,
+		"heavypistol":     3,
+		"heavyrifle":      4,
+		"smg":             5,
+		"spitdart":        6,
+		"shotgun":         7,
+		"battlerifle":     8,
+		"heavyshotgun":    9,
+		"missilelauncher": 10,
+		"flamethrower":    11,
+		"fireballer":      12,
+		"lasgun":          13,
+		"ammunition":      14,
 		// VEHICLES: ONE MAN(0) FOUR MAN/buggy(1) LIGHT ORNITHOPTER(2) MEDIUM ORNITHOPTER(3) CARRY-ALL/transport(4) SANDCRAWLER(5)
 		"sandbike":             0,
 		"buggy":                1,
@@ -77,6 +91,7 @@ var knownCodes = [4]map[string]byte{
 		"armor":  0,
 		"melee":  1,
 		"ranged": 2,
+		"misc":   3,
 		// MISC: FUEL(0) REFINED RESOURCES(1) COMPONENTS(2) RAW RESOURCES(3)
 		"fuel":             0,
 		"refinedresources": 1,

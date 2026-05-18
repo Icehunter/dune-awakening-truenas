@@ -200,7 +200,8 @@ for key, entry in rows.items():
     tier = get_tier(tags)
     tradeable = not (
         'Items.ExcludeFromExchange' in tags or
-        'Items.ActorBoundItem' in tags
+        'Items.ActorBoundItem' in tags or
+        'Items.ExcludeFromPlayerBuyingFromVendor' in tags
     )
 
     item = {
@@ -381,23 +382,32 @@ def cost_for_tier(ings, vp):
         total += (vp.get(name) or 0) * qty
     return total
 
-cost_by_item = {}  # item_key -> [cost0, cost1, cost2, cost3, cost4, cost5]
+cost_by_item = {}        # item_key -> [cost0..cost5]
+min_craftable_by_item = {}  # item_key -> first grade with no 9999-qty ingredient
 for key, val in rows.items():
     r = val.get('Recipe', {})
     out = (r.get('Outcome') or [{}])[0].get('Key', {}).get('Name', '')
     if not out:
         continue
     iqs = r.get('IngredientsPerQuality') or [{}]
-    # Compute costs for each tier, padding to 6 with last tier
     tier_costs = []
+    min_craftable = 0
     for i in range(6):
         tier = iqs[min(i, len(iqs)-1)]
         ings = tier.get('Ingredients', [])
         tier_costs.append(cost_for_tier(ings, vp))
+        # Track first grade whose recipe has no sentinel (9999+) ingredient quantities.
+        # Grades with 9999 quantities are placeholders meaning "not craftable yet".
+        if any(ing.get('Value', {}).get('Amount', 0) >= 9999 for ing in ings):
+            if i == min_craftable:
+                min_craftable = i + 1
     if any(c > 0 for c in tier_costs):
         cost_by_item[out] = tier_costs
+    if min_craftable > 0:
+        min_craftable_by_item[out] = min_craftable
 
 count = 0
+mcg_count = 0
 for key, entry in catalog['items'].items():
     if key in cost_by_item:
         costs = cost_by_item[key]
@@ -406,10 +416,20 @@ for key, entry in catalog['items'].items():
             entry['material_cost'] = costs[-1]  # grade 5 (highest) for backward compat
             count += 1
 
+# Apply min_craftable_grade as min_quality_level to items and their schematics.
+# This prevents listing at grades where the recipe uses 9999-quantity sentinel ingredients.
+for out, mcg in min_craftable_by_item.items():
+    for target_key in (out, out + '_Schematic'):
+        if target_key in catalog['items']:
+            existing = catalog['items'][target_key].get('min_quality_level', 0)
+            if mcg > existing:
+                catalog['items'][target_key]['min_quality_level'] = mcg
+                mcg_count += 1
+
 with open("$OUT_PATH", 'w') as f:
     json.dump(catalog, f, separators=(',', ':'))
 
-print(f"Added material_cost_per_grade to {count} items in $OUT_PATH")
+print(f"Added material_cost_per_grade to {count} items, set min_quality_level on {mcg_count} items/schematics in $OUT_PATH")
 PYEOF
 
 rm "$RECIPES_STRIPPED"
@@ -461,6 +481,24 @@ with open(OUT, 'w') as f:
     json.dump(catalog, f, separators=(',', ':'))
 
 print(f"Marked {count} items as gradeable (schematic present in DifficultyScaled loot tables)")
+
+# Some Unique ITEMS exist only as grade 0 even though their schematics drop at grades 0-5.
+# Force is_gradeable=False so the bot lists only one grade-0 listing instead of five.
+# The matching *_Schematic entry is already correctly is_gradeable=True from above.
+GRADE_0_ONLY_ITEMS = {
+    'PowerPack_Unique_Capacity_06',  # Accelerator Power Pack item — schematic is graded, item is not
+}
+forced = 0
+for item_key in GRADE_0_ONLY_ITEMS:
+    if item_key in catalog['items'] and catalog['items'][item_key].get('is_gradeable'):
+        catalog['items'][item_key]['is_gradeable'] = False
+        forced += 1
+
+if forced:
+    print(f"Forced is_gradeable=False on {forced} grade-0-only items")
+
+with open(OUT, 'w') as f:
+    json.dump(catalog, f, separators=(',', ':'))
 PYEOF
 
 # --- Step 5: min_quality_level from augment upgrade JSON files ---

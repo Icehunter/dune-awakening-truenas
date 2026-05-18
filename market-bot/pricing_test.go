@@ -79,9 +79,28 @@ func TestCategoryMask(t *testing.T) {
 		wantD3   byte
 		wantMask int32
 	}{
-		// Weapons: shortblades remapped to items/weapons/melee/shortblades
+		// Weapons: shortblades/longblades remapped to items/weapons/melee/*
 		{"items/weapons/shortblades", 1, 0, 0, 0x01000000},
 		{"items/weapons/longblades", 1, 0, 1, 0x01000100},
+		// Ranged weapon item types (depth-2 codes, same order as UniqueSchematicsMask d3)
+		{"items/weapons/pistol", 1, 2, 0, 0x01020000},
+		{"items/weapons/heavypistol", 1, 3, 0, 0x01030000},
+		{"items/weapons/heavyrifle", 1, 4, 0, 0x01040000},
+		{"items/weapons/smg", 1, 5, 0, 0x01050000},
+		{"items/weapons/spitdart", 1, 6, 0, 0x01060000},
+		{"items/weapons/shotgun", 1, 7, 0, 0x01070000},
+		{"items/weapons/battlerifle", 1, 8, 0, 0x01080000},
+		{"items/weapons/heavyshotgun", 1, 9, 0, 0x01090000},
+		{"items/weapons/missilelauncher", 1, 10, 0, 0x010A0000},
+		{"items/weapons/flamethrower", 1, 11, 0, 0x010B0000},
+		{"items/weapons/fireballer", 1, 12, 0, 0x010C0000},
+		{"items/weapons/lasgun", 1, 13, 0, 0x010D0000},
+		{"items/weapons/ammunition", 1, 14, 0, 0x010E0000},
+		// AUGMENTATIONS item types including GENERIC/misc
+		{"items/augment/armor", 4, 0, 0, 0x04000000},
+		{"items/augment/melee", 4, 1, 0, 0x04010000},
+		{"items/augment/ranged", 4, 2, 0, 0x04020000},
+		{"items/augment/misc", 4, 3, 0, 0x04030000},
 		// MISC
 		{"items/misc/refinedresources", 5, 1, 0, 0x05010000},
 		{"items/misc/components", 5, 2, 0, 0x05020000},
