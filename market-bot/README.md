@@ -188,34 +188,24 @@ On a fresh VM the k3s Deployment and namespace do not yet exist. `deploy.sh` cre
 
 ## Configuration
 
-All configuration is in `k8s/market-bot.yaml` (ConfigMap + Secret). **Edit this file before your first deploy.**
+Static defaults live in `k8s/market-bot.yaml` (ConfigMap + Secret). The deploy scripts detect the database service and PostgreSQL pod in the target cluster during deployment, read the database connection values from the pod environment, render a temporary manifest, and apply that manifest. The detected password is not written back to `k8s/market-bot.yaml`.
 
-### Required: set DB_HOST
-
-`DB_HOST` is the only value that differs between deployments. It is the in-cluster DNS name of the PostgreSQL service, which is unique to each Dune server instance.
-
-**Find the correct value by SSH-ing into the VM and running:**
+You can override detection with environment variables:
 
 ```bash
-sudo kubectl get svc -A | grep -i db
+DUNE_DB_HOST=... DUNE_DB_USER=... DUNE_DB_PASS=... bash deploy.sh
 ```
 
-Look for the service in the `funcom-seabass-*` namespace. The full DNS name to use is:
-
-```
-<service-name>.<namespace>.svc.cluster.local
-```
-
-Then open `k8s/market-bot.yaml` locally and set `DB_HOST` in the ConfigMap to that value before running the deploy script.
+`DUNE_DB_PORT` and `DUNE_DB_NAME` are optional overrides.
 
 ### All settings
 
 | Setting | Default | Where |
 |---------|---------|-------|
-| **DB host** | *(your cluster's DNS name — must be changed)* | ConfigMap `DB_HOST` |
-| DB port | `15432` | ConfigMap `DB_PORT` |
-| DB user | `dune` | ConfigMap `DB_USER` |
-| DB password | `dune` | Secret `DB_PASS` |
+| **DB host** | detected by deploy script | ConfigMap `DB_HOST` |
+| DB port | detected by deploy script, fallback `15432` | ConfigMap `DB_PORT` |
+| DB user | detected by deploy script | ConfigMap `DB_USER` |
+| DB password | detected by deploy script | Secret `DB_PASS` |
 | DB name | `dune` | ConfigMap `DB_NAME` |
 | Tick interval | `5m` | ConfigMap `INTERVAL` |
 | Item data path | `/data/item-data.json` | ConfigMap `ITEM_DATA_PATH` |
