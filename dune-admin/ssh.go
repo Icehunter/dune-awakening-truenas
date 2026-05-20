@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	tea "charm.land/bubbletea/v2"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"golang.org/x/crypto/ssh"
 )
@@ -18,6 +19,7 @@ var (
 	globalDB    *pgxpool.Pool
 	globalPodIP string
 	globalPodNS string
+	globalPod   string
 )
 
 // cmdConnect is the BubbleTea Cmd fired on Init. It dials SSH, discovers the
@@ -60,16 +62,37 @@ func cmdConnect() tea.Msg {
 		return msgConnect{err: fmt.Errorf("db pod not found")}
 	}
 	globalPodNS = parts[0]
+	globalPod = parts[1]
 	podIP := parts[2]
 	globalSSH = client
 	globalPodIP = podIP
 
+	pool, err := connectDB(context.Background(), dbUser, dbPass)
+	if err != nil && dbUser == "dune" && dbPass == "dune" {
+		if postgresPass, passErr := discoverPostgresPassword(client); passErr == nil && postgresPass != "" {
+			pool, err = connectDB(context.Background(), "postgres", postgresPass)
+		}
+	}
+	if err != nil {
+		client.Close()
+		globalSSH = nil
+		return msgConnect{err: fmt.Errorf("DB connect: %w", err)}
+	}
+	globalDB = pool
+	return msgConnect{}
+}
+
+func connectDB(ctx context.Context, user, pass string) (*pgxpool.Pool, error) {
 	connStr := fmt.Sprintf(
 		"host=127.0.0.1 port=%d user=%s password=%s dbname=%s sslmode=disable",
-		dbPort, dbUser, dbPass, dbName)
+		dbPort, user, pass, dbName)
 	poolCfg, err := pgxpool.ParseConfig(connStr)
 	if err != nil {
-		return msgConnect{err: err}
+		return nil, err
+	}
+	poolCfg.AfterConnect = func(ctx context.Context, conn *pgx.Conn) error {
+		_, err := conn.Exec(ctx, fmt.Sprintf(`SET search_path TO %s, public`, pgx.Identifier{dbSchema}.Sanitize()))
+		return err
 	}
 	poolCfg.ConnConfig.LookupFunc = func(_ context.Context, _ string) ([]string, error) {
 		return []string{globalPodIP}, nil
@@ -77,12 +100,38 @@ func cmdConnect() tea.Msg {
 	poolCfg.ConnConfig.DialFunc = func(_ context.Context, _, _ string) (net.Conn, error) {
 		return globalSSH.Dial("tcp", fmt.Sprintf("%s:%d", globalPodIP, dbPort))
 	}
-	pool, err := pgxpool.NewWithConfig(context.Background(), poolCfg)
+	pool, err := pgxpool.NewWithConfig(ctx, poolCfg)
 	if err != nil {
-		return msgConnect{err: fmt.Errorf("DB connect: %w", err)}
+		return nil, err
 	}
-	globalDB = pool
-	return msgConnect{}
+	if err := pool.Ping(ctx); err != nil {
+		pool.Close()
+		return nil, err
+	}
+	dbUser = user
+	dbPass = pass
+	return pool, nil
+}
+
+func discoverPostgresPassword(client *ssh.Client) (string, error) {
+	if globalPodNS == "" || globalPod == "" {
+		return "", fmt.Errorf("db pod not discovered")
+	}
+	sess, err := client.NewSession()
+	if err != nil {
+		return "", err
+	}
+	defer sess.Close()
+	cmd := fmt.Sprintf("sudo kubectl exec -n %s %s -- printenv POSTGRES_PASSWORD", shellQuote(globalPodNS), shellQuote(globalPod))
+	out, err := sess.CombinedOutput(cmd)
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(string(out)), nil
+}
+
+func shellQuote(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", "'\\''") + "'"
 }
 
 // sshExec runs a command on the remote VM and returns combined stdout+stderr.

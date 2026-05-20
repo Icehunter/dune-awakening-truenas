@@ -204,14 +204,19 @@ func (e *Exchange) initBotUser(ctx context.Context) error {
 	err := e.db.QueryRow(ctx,
 		`SELECT id FROM dune.actors WHERE class = 'Revy' LIMIT 1`).Scan(&e.ownerID)
 	if err == pgx.ErrNoRows {
-		// Get a valid partition_id so the bot actor is visible to admin lookups
-		// and won't be orphaned by partition cleanup.
+		// Use a valid world partition so the bot actor satisfies the actors FK.
 		var partitionID int64
-		_ = e.db.QueryRow(ctx,
-			`SELECT id FROM dune.partition_definition ORDER BY id LIMIT 1`).Scan(&partitionID)
+		partitionArg := any(nil)
+		partitionErr := e.db.QueryRow(ctx,
+			`SELECT partition_id FROM dune.world_partition ORDER BY partition_id LIMIT 1`).Scan(&partitionID)
+		if partitionErr == nil {
+			partitionArg = partitionID
+		} else if partitionErr != pgx.ErrNoRows {
+			return fmt.Errorf("bot actor partition: %w", partitionErr)
+		}
 		err = e.db.QueryRow(ctx,
 			`INSERT INTO dune.actors (class, serial, gas_attributes, properties, dimension_index, partition_id)
-			 VALUES ('Revy', 0, '{}', '{}', 0, $1) RETURNING id`, partitionID).Scan(&e.ownerID)
+			 VALUES ('Revy', 0, '{}', '{}', 0, $1) RETURNING id`, partitionArg).Scan(&e.ownerID)
 	}
 	if err != nil {
 		return fmt.Errorf("bot actor: %w", err)

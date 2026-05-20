@@ -73,6 +73,28 @@ function Invoke-Scp {
     if ($LASTEXITCODE -ne 0) { throw "SCP failed (exit $LASTEXITCODE)" }
 }
 
+function Get-ManifestValue {
+    param([string]$Key)
+    $line = Get-Content (Join-Path $ScriptDir "k8s\market-bot.yaml") |
+            Where-Object { $_ -match "^\s*$([regex]::Escape($Key)):\s*" } |
+            Select-Object -First 1
+    if (-not $line) { return "" }
+    return (($line -replace '^\s*[^:]+:\s*', '') -replace '^"|"$', '')
+}
+
+function ConvertTo-YamlString {
+    param([string]$Value)
+    return '"' + (($Value -replace '\\', '\\') -replace '"', '\"') + '"'
+}
+
+function Set-ManifestValue {
+    param([string]$Manifest, [string]$Key, [string]$Value)
+    $yamlValue = ConvertTo-YamlString $Value
+    $pattern = "(?m)^(\s*$([regex]::Escape($Key)):\s*).*$"
+    if ($Manifest -notmatch $pattern) { throw "missing manifest key: $Key" }
+    return $Manifest -replace $pattern, "`${1}${yamlValue}"
+}
+
 # ── 1. Cross-compile ──────────────────────────────────────────────────────────
 Write-Host "==> Cross-compiling for Linux/amd64..." -ForegroundColor Cyan
 Push-Location $ScriptDir
@@ -130,7 +152,52 @@ if ($DetectedDbHost) {
     $yaml | Set-Content $yamlPath -NoNewline
 }
 
-# ── 2b. Drop existing bot orders ─────────────────────────────────────────────
+# ── 2b. Detect DB credentials ────────────────────────────────────────────────
+$DetectedDbUser = ""
+$DetectedDbPass = ""
+$DetectedDbName = ""
+$DetectedDbPort = ""
+
+Write-Host "==> Detecting DB credentials from cluster..." -ForegroundColor Cyan
+try {
+    $dbEnvInfo = & ssh -o StrictHostKeyChecking=no -i $SshKey "${VmUser}@${VmIp}" "sudo kubectl get pods -A --no-headers 2>/dev/null | grep 'db-dbdepl-sts-0'" 2>$null
+    if ($dbEnvInfo) {
+        $parts = ($dbEnvInfo -split '\s+', 3)
+        $envNs = $parts[0]; $envPod = $parts[1]
+        $dbEnv = & ssh -o StrictHostKeyChecking=no -i $SshKey "${VmUser}@${VmIp}" "sudo kubectl exec -n $envNs $envPod -- printenv" 2>$null
+        foreach ($line in $dbEnv) {
+            if ($line -match '^POSTGRES_USER=(.*)$') { $DetectedDbUser = $Matches[1] }
+            if ($line -match '^POSTGRES_PASSWORD=(.*)$') { $DetectedDbPass = $Matches[1] }
+            if ($line -match '^POSTGRES_DB=(.*)$') { $DetectedDbName = $Matches[1] }
+            if ($line -match '^PGPORT=(.*)$') { $DetectedDbPort = $Matches[1] }
+        }
+    } else {
+        Write-Host "    warn: DB pod not found, using DB credentials from k8s/market-bot.yaml"
+    }
+} catch {
+    Write-Host "    warn: credential detection failed: $_" -ForegroundColor Yellow
+}
+
+$DbHost = if ($env:DUNE_DB_HOST) { $env:DUNE_DB_HOST } elseif ($DetectedDbHost) { $DetectedDbHost } else { Get-ManifestValue "DB_HOST" }
+$DbPort = if ($env:DUNE_DB_PORT) { $env:DUNE_DB_PORT } elseif ($DetectedDbPort) { $DetectedDbPort } else { Get-ManifestValue "DB_PORT" }
+$DbUser = if ($env:DUNE_DB_USER) { $env:DUNE_DB_USER } elseif ($DetectedDbUser) { $DetectedDbUser } else { Get-ManifestValue "DB_USER" }
+$DbPass = if ($env:DUNE_DB_PASS) { $env:DUNE_DB_PASS } elseif ($DetectedDbPass) { $DetectedDbPass } else { Get-ManifestValue "DB_PASS" }
+$DbName = if ($env:DUNE_DB_NAME) { $env:DUNE_DB_NAME } else { Get-ManifestValue "DB_NAME" }
+
+if (-not $DbPort) { $DbPort = "15432" }
+if (-not $DbName) {
+    if ($DetectedDbName) { $DbName = $DetectedDbName } else { $DbName = "dune" }
+}
+if (-not $DbHost -or -not $DbUser -or -not $DbPass) {
+    throw "could not detect complete DB credentials. Set DUNE_DB_HOST, DUNE_DB_USER, DUNE_DB_PASS, and optionally DUNE_DB_PORT/DUNE_DB_NAME."
+}
+
+Write-Host "    user: $DbUser"
+Write-Host "    database: $DbName"
+Write-Host "    port: $DbPort"
+Write-Host "    password: detected"
+
+# ── 2c. Drop existing bot orders ─────────────────────────────────────────────
 Write-Host "==> Dropping existing bot orders..." -ForegroundColor Cyan
 try {
     $dbInfo = & ssh -o StrictHostKeyChecking=no -i $SshKey "${VmUser}@${VmIp}" "sudo kubectl get pods -A --no-headers | grep 'db-dbdepl-sts-0'" 2>$null
@@ -172,9 +239,11 @@ Invoke-Scp (Join-Path $DataDir "item-data.json") "${VmUser}@${VmIp}:${RemoteDir}
 # ── 5. Apply k8s manifest ─────────────────────────────────────────────────────
 Write-Host "==> Applying k8s manifests..." -ForegroundColor Cyan
 $manifest = Get-Content (Join-Path $ScriptDir "k8s\market-bot.yaml") -Raw
-if ($DetectedDbHost) {
-    $manifest = $manifest -replace '(?m)^(\s*DB_HOST:\s*).*$', "`${1}${DetectedDbHost}"
-}
+$manifest = Set-ManifestValue $manifest "DB_HOST" $DbHost
+$manifest = Set-ManifestValue $manifest "DB_PORT" $DbPort
+$manifest = Set-ManifestValue $manifest "DB_USER" $DbUser
+$manifest = Set-ManifestValue $manifest "DB_PASS" $DbPass
+$manifest = Set-ManifestValue $manifest "DB_NAME" $DbName
 $manifest | & ssh -o StrictHostKeyChecking=no -i $SshKey "${VmUser}@${VmIp}" "sudo kubectl apply -f -"
 if ($LASTEXITCODE -ne 0) { throw "kubectl apply failed" }
 
