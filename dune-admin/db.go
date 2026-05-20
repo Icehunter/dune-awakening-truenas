@@ -62,7 +62,7 @@ func cmdFetchInventory(playerID int64) tea.Cmd {
 			       COALESCE((i.stats->'FItemStackAndDurabilityStats'->1->>'CurrentDurability'), 'N/A')
 			FROM dune.items i
 			JOIN dune.inventories inv ON i.inventory_id = inv.id
-			WHERE inv.actor_id = $1
+			WHERE inv.actor_id = $1::bigint
 			ORDER BY i.template_id`, playerID)
 		if err != nil {
 			return msgInventory{err: err}
@@ -127,7 +127,7 @@ func cmdFetchFactions() tea.Msg {
 		JOIN dune.factions f ON f.id = pfr.faction_id
 		LEFT JOIN dune.player_virtual_currency_balances vcb
 			ON vcb.player_controller_id = pfr.actor_id
-			AND vcb.currency_id = $1
+			AND vcb.currency_id = $1::smallint
 		ORDER BY pfr.actor_id, pfr.faction_id`, scripID)
 	if err != nil {
 		return msgFactions{err: err}
@@ -243,12 +243,12 @@ func cmdGiveItem(playerID int64, template string, qty, quality int64) tea.Cmd {
 		err := globalDB.QueryRow(ctx, `
 			SELECT id, COALESCE(max_item_count, -1), COALESCE(max_item_volume, -1)
 			FROM dune.inventories
-			WHERE actor_id = $1 AND inventory_type = 0
+			WHERE actor_id = $1::bigint AND inventory_type = 0
 			LIMIT 1`, playerID).Scan(&invID, &maxSlots, &maxVolume)
 		if err != nil {
 			err = globalDB.QueryRow(ctx,
 				`SELECT id, COALESCE(max_item_count, -1), COALESCE(max_item_volume, -1)
-				 FROM dune.inventories WHERE actor_id = $1 LIMIT 1`, playerID).Scan(&invID, &maxSlots, &maxVolume)
+				 FROM dune.inventories WHERE actor_id = $1::bigint LIMIT 1`, playerID).Scan(&invID, &maxSlots, &maxVolume)
 			if err != nil {
 				return msgMutate{err: fmt.Errorf("find inventory: %w", err)}
 			}
@@ -270,7 +270,7 @@ func cmdGiveItem(playerID int64, template string, qty, quality int64) tea.Cmd {
 		rows, err := globalDB.Query(ctx, `
 			SELECT id, template_id, stack_size, quality_level, volume_override, position_index
 			FROM dune.items
-			WHERE inventory_id = $1`, invID)
+			WHERE inventory_id = $1::bigint`, invID)
 		if err != nil {
 			return msgMutate{err: err}
 		}
@@ -405,8 +405,8 @@ func cmdGiveItem(playerID int64, template string, qty, quality int64) tea.Cmd {
 		for _, u := range updates {
 			_, err = tx.Exec(ctx, `
 				UPDATE dune.items
-				SET stack_size = stack_size + $1
-				WHERE id = $2`, u.add, u.id)
+				SET stack_size = stack_size + $1::bigint
+				WHERE id = $2::bigint`, u.add, u.id)
 			if err != nil {
 				return msgMutate{err: err}
 			}
@@ -416,7 +416,7 @@ func cmdGiveItem(playerID int64, template string, qty, quality int64) tea.Cmd {
 		for _, size := range newStacks {
 			_, err = tx.Exec(ctx, `
 				INSERT INTO dune.items (inventory_id, stack_size, position_index, template_id, quality_level, stats)
-				VALUES ($1, $2, $3, $4, $5, '{}')`,
+				VALUES ($1::bigint, $2::bigint, $3::bigint, $4::text, $5::bigint, '{}'::jsonb)`,
 				invID, size, nextPos, template, quality)
 			if err != nil {
 				return msgMutate{err: err}
@@ -448,9 +448,13 @@ func cmdGiveCurrency(playerID int64, amount int64) tea.Cmd {
 		}
 		ctx := context.Background()
 		// Route through adjust_player_virtual_currency_balance for audit logging
-		// and negative-balance guards. currency_id=0 is Solaris.
+		// and negative-balance guards. The casts match the live function signature.
 		_, err := globalDB.Exec(ctx, `
-			SELECT dune.adjust_player_virtual_currency_balance($1, 0, $2)`,
+			SELECT dune.adjust_player_virtual_currency_balance(
+				$1::bigint,
+				dune.get_solaris_id(),
+				$2::bigint
+			)`,
 			playerID, amount)
 		if err != nil {
 			return msgMutate{err: err}
@@ -458,7 +462,7 @@ func cmdGiveCurrency(playerID int64, amount int64) tea.Cmd {
 		var balance int64
 		_ = globalDB.QueryRow(ctx, `
 			SELECT balance FROM dune.player_virtual_currency_balances
-			WHERE player_controller_id = $1 AND currency_id = 0`,
+			WHERE player_controller_id = $1::bigint AND currency_id = dune.get_solaris_id()`,
 			playerID).Scan(&balance)
 		return msgMutate{ok: fmt.Sprintf(
 			"Added %d Solaris to player %d — new balance %d",
@@ -490,7 +494,7 @@ func cmdGiveLandsraadScrip(actorID int64, delta int32) tea.Cmd {
 			return msgMutate{err: err}
 		}
 		_, err = globalDB.Exec(ctx, `
-			SELECT dune.adjust_player_virtual_currency_balance($1, $2, $3)`,
+			SELECT dune.adjust_player_virtual_currency_balance($1::bigint, $2::smallint, $3::bigint)`,
 			actorID, currencyID, int64(delta))
 		if err != nil {
 			return msgMutate{err: err}
@@ -498,7 +502,7 @@ func cmdGiveLandsraadScrip(actorID int64, delta int32) tea.Cmd {
 		var balance int64
 		_ = globalDB.QueryRow(ctx, `
 			SELECT balance FROM dune.player_virtual_currency_balances
-			WHERE player_controller_id = $1 AND currency_id = $2`,
+			WHERE player_controller_id = $1::bigint AND currency_id = $2::smallint`,
 			actorID, currencyID).Scan(&balance)
 		return msgMutate{ok: fmt.Sprintf(
 			"Added %d scrips (currency %d) to player %d — new balance %d",
@@ -513,8 +517,8 @@ func cmdAwardXP(playerID int64, trackType string, delta int32) tea.Cmd {
 		}
 		res, err := globalDB.Exec(context.Background(), `
 			UPDATE dune.specialization_tracks
-			SET xp_amount = xp_amount + $1
-			WHERE player_id = $2 AND track_type::text = $3`,
+			SET xp_amount = xp_amount + $1::integer
+			WHERE player_id = $2::bigint AND track_type::text = $3::text`,
 			delta, playerID, trackType)
 		if err != nil {
 			return msgMutate{err: err}
@@ -522,7 +526,7 @@ func cmdAwardXP(playerID int64, trackType string, delta int32) tea.Cmd {
 		if res.RowsAffected() == 0 {
 			_, err = globalDB.Exec(context.Background(), `
 				INSERT INTO dune.specialization_tracks (player_id, track_type, xp_amount, level)
-				VALUES ($1, $2::dune.specializationtracktype, $3, 0)`, playerID, trackType, delta)
+				VALUES ($1::bigint, $2::dune.specializationtracktype, $3::integer, 0::real)`, playerID, trackType, delta)
 			if err != nil {
 				return msgMutate{err: err}
 			}
@@ -546,8 +550,8 @@ func cmdKickPlayer(playerID int64) tea.Cmd {
 		// without touching any game data (inventory, buildings, etc. are untouched).
 		res, err := globalDB.Exec(ctx, `
 			UPDATE dune.player_state
-			SET online_status = 'LoggingOut'
-			WHERE player_controller_id = $1`, playerID)
+			SET online_status = 'LoggingOut'::dune.playerconnectionstatus
+			WHERE player_controller_id = $1::bigint`, playerID)
 		if err != nil {
 			return msgMutate{err: fmt.Errorf("kick: %w", err)}
 		}
@@ -567,7 +571,7 @@ func cmdDeleteItem(itemID int64) tea.Cmd {
 			return msgMutate{err: fmt.Errorf("item ID required")}
 		}
 		ctx := context.Background()
-		res, err := globalDB.Exec(ctx, `DELETE FROM dune.items WHERE id = $1`, itemID)
+		res, err := globalDB.Exec(ctx, `DELETE FROM dune.items WHERE id = $1::bigint`, itemID)
 		if err != nil {
 			return msgMutate{err: fmt.Errorf("delete item: %w", err)}
 		}
@@ -591,14 +595,14 @@ func cmdResetSpecializations(playerID int64, trackType string) tea.Cmd {
 		var tracksDeleted, keystonesDeleted int64
 		if trackType == "" || strings.EqualFold(trackType, "all") {
 			res, err := globalDB.Exec(ctx,
-				`DELETE FROM dune.specialization_tracks WHERE player_id = $1`, playerID)
+				`DELETE FROM dune.specialization_tracks WHERE player_id = $1::bigint`, playerID)
 			if err != nil {
 				return msgMutate{err: fmt.Errorf("reset tracks: %w", err)}
 			}
 			tracksDeleted = res.RowsAffected()
 
 			res, err = globalDB.Exec(ctx,
-				`DELETE FROM dune.purchased_specialization_keystones WHERE player_id = $1`, playerID)
+				`DELETE FROM dune.purchased_specialization_keystones WHERE player_id = $1::bigint`, playerID)
 			if err != nil {
 				return msgMutate{err: fmt.Errorf("reset keystones: %w", err)}
 			}
@@ -606,7 +610,7 @@ func cmdResetSpecializations(playerID int64, trackType string) tea.Cmd {
 		} else {
 			res, err := globalDB.Exec(ctx, `
 				DELETE FROM dune.specialization_tracks
-				WHERE player_id = $1 AND track_type::text = $2`, playerID, trackType)
+				WHERE player_id = $1::bigint AND track_type::text = $2::text`, playerID, trackType)
 			if err != nil {
 				return msgMutate{err: fmt.Errorf("reset track: %w", err)}
 			}
@@ -729,7 +733,7 @@ func resolveStackMax(ctx context.Context, template string, quality int64) (int64
 	err := globalDB.QueryRow(ctx, `
 		SELECT COALESCE(MAX(stack_size), 0)
 		FROM dune.items
-		WHERE template_id = $1 AND quality_level = 0`, template).Scan(&maxStack)
+		WHERE template_id = $1::text AND quality_level = 0`, template).Scan(&maxStack)
 	if err != nil {
 		return 0, err
 	}
@@ -753,7 +757,7 @@ func resolveItemVolume(ctx context.Context, template string) (float64, error) {
 	err := globalDB.QueryRow(ctx, `
 		SELECT MAX(volume_override)
 		FROM dune.items
-		WHERE template_id = $1 AND volume_override IS NOT NULL`, template).Scan(&vol)
+		WHERE template_id = $1::text AND volume_override IS NOT NULL`, template).Scan(&vol)
 	if err != nil {
 		return 0, err
 	}
@@ -796,7 +800,7 @@ func resolveScripCurrencyID(ctx context.Context) (int16, error) {
 	rows, err := globalDB.Query(ctx, `
 		SELECT currency_id, COALESCE(SUM(balance), 0) AS total
 		FROM dune.player_virtual_currency_balances
-		WHERE currency_id <> get_solaris_id()
+		WHERE currency_id <> dune.get_solaris_id()
 		GROUP BY currency_id
 		ORDER BY total DESC, currency_id`)
 	if err != nil {
@@ -831,7 +835,7 @@ func applyFactionRepDelta(ctx context.Context, actorID int64, factionID int16, d
 	var currentRep int32
 	_ = globalDB.QueryRow(ctx, `
 		SELECT COALESCE(reputation_amount, 0) FROM dune.player_faction_reputation
-		WHERE actor_id = $1 AND faction_id = $2`, actorID, factionID).Scan(&currentRep)
+		WHERE actor_id = $1::bigint AND faction_id = $2::smallint`, actorID, factionID).Scan(&currentRep)
 
 	newRep := currentRep + delta
 	if newRep < 0 {
@@ -841,7 +845,7 @@ func applyFactionRepDelta(ctx context.Context, actorID int64, factionID int16, d
 	// set_player_faction_reputation(actor_id, faction_id, new_reputation) handles
 	// both the reputation update and tier tag synchronization server-side.
 	_, err := globalDB.Exec(ctx, `
-		SELECT dune.set_player_faction_reputation($1, $2, $3)`,
+		SELECT dune.set_player_faction_reputation($1::bigint, $2::smallint, $3::integer)`,
 		actorID, factionID, newRep)
 	if err != nil {
 		return msgMutate{err: fmt.Errorf("set_player_faction_reputation: %w", err)}
@@ -957,7 +961,7 @@ func cmdDescribeTable(tbl string) tea.Cmd {
 			SELECT column_name, data_type,
 			       CASE is_nullable WHEN 'YES' THEN 'null' ELSE 'not null' END
 			FROM information_schema.columns
-			WHERE table_schema = $1 AND table_name = $2
+			WHERE table_schema = $1::text AND table_name = $2::text
 			ORDER BY ordinal_position`, dbSchema, tbl)
 		if err != nil {
 			return msgDescribe{table: tbl, err: err}
@@ -1023,8 +1027,8 @@ func cmdSearchColumns(term string) tea.Cmd {
 		rows, err := globalDB.Query(context.Background(), `
 			SELECT table_name, column_name, data_type
 			FROM information_schema.columns
-			WHERE table_schema = $1
-			  AND (column_name ILIKE $2 OR table_name ILIKE $2)
+			WHERE table_schema = $1::text
+			  AND (column_name ILIKE $2::text OR table_name ILIKE $2::text)
 			ORDER BY table_name, column_name`, dbSchema, "%"+term+"%")
 		if err != nil {
 			return msgSearchCols{err: err}

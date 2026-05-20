@@ -44,11 +44,11 @@ func resolveKeyPath() string {
 		return sshKeyPath
 	}
 	candidates := []string{
-		"../sshKey",
-		"./sshKey",
-		filepath.Join(os.Getenv("HOME"), ".ssh", "dune"),
 		filepath.Join(os.Getenv("HOME"), ".ssh", "id_ed25519"),
 		filepath.Join(os.Getenv("HOME"), ".ssh", "id_rsa"),
+		filepath.Join(os.Getenv("HOME"), ".ssh", "dune"),
+		"../sshKey",
+		"./sshKey",
 	}
 	for _, p := range candidates {
 		if _, err := os.Stat(p); err == nil {

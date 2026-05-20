@@ -10,6 +10,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -53,7 +54,16 @@ func main() {
 		"host=%s port=%d user=%s password=%s dbname=%s sslmode=disable",
 		*flagDBHost, *flagDBPort, *flagDBUser, *flagDBPass, *flagDBName,
 	)
-	pool, err := pgxpool.New(ctx, connStr)
+	poolConfig, err := pgxpool.ParseConfig(connStr)
+	if err != nil {
+		log.Fatalf("db config: %v", err)
+	}
+	poolConfig.AfterConnect = func(ctx context.Context, conn *pgx.Conn) error {
+		_, err := conn.Exec(ctx, `SET search_path TO dune, public`)
+		return err
+	}
+
+	pool, err := pgxpool.NewWithConfig(ctx, poolConfig)
 	if err != nil {
 		log.Fatalf("db connect: %v", err)
 	}
