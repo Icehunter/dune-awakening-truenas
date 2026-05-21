@@ -43,7 +43,7 @@ func newDatabaseState() DatabaseState {
 	si.CharLimit = 128
 
 	qi := textinput.New()
-	qi.Placeholder = "SELECT …"
+	qi.Placeholder = "SELECT / UPDATE / INSERT / DELETE …"
 	qi.CharLimit = 512
 
 	return DatabaseState{searchInput: si, sqlInput: qi}
@@ -60,7 +60,9 @@ func databaseUpdate(msg tea.Msg, m model) (model, tea.Cmd) {
 			m.statusMsg, m.statusIsOK = msg.err.Error(), false
 		} else {
 			db.tables = msg.rows
-			db.tbl = buildTablesWidget(msg.rows, m.width)
+			w, h := m.tableArea()
+			db.tbl = buildTablesWidget(msg.rows, w)
+			db.tbl.SetHeight(h)
 			db.subView = dbvTables
 		}
 		return m, nil
@@ -221,12 +223,15 @@ func databaseUpdate(msg tea.Msg, m model) (model, tea.Cmd) {
 
 // buildTablesWidget creates a bubbles table widget from the table list.
 func buildTablesWidget(rows []tableRow, width int) table.Model {
-	nameW := 42
+	nameW := width - 24
+	if nameW < 24 {
+		nameW = 24
+	}
 	rowW := 14
-	cols := []table.Column{
+	cols := fitTableColumns([]table.Column{
 		{Title: "Table", Width: nameW},
 		{Title: "Rows", Width: rowW},
-	}
+	}, width)
 	var trows []table.Row
 	for _, r := range rows {
 		trows = append(trows, table.Row{r.Name, fmt.Sprintf("%d", r.RowCount)})
@@ -238,9 +243,11 @@ func buildTablesWidget(rows []tableRow, width int) table.Model {
 		table.WithHeight(20),
 	)
 	s := table.DefaultStyles()
-	s.Header = styleTableHdr
+	s.Header = styleTableHdr.Padding(0, 1)
+	s.Cell = styleNormal.Padding(0, 1)
 	s.Selected = styleTableSel
 	t.SetStyles(s)
+	t.SetWidth(width)
 	return t
 }
 
@@ -278,7 +285,7 @@ func renderGridResult(title string, headers []string, rows [][]string) string {
 // databaseView renders the Database tab.
 func databaseView(m model) string {
 	db := m.db
-	menuW := 24
+	menuW := adaptiveMenuWidth(m.width)
 	contentW := m.width - menuW - 1
 	if contentW < 10 {
 		contentW = 10
@@ -309,7 +316,7 @@ func databaseView(m model) string {
 	for len(menuLines) < inner {
 		menuLines = append(menuLines, "")
 	}
-	menuPane := stylePanelBorder.Width(menuW).Height(inner).Render(strings.Join(menuLines, "\n"))
+	menuPane := overlayTitle(stylePanelBorder.Width(menuW).Height(inner).Render(strings.Join(menuLines, "\n")), " Database ")
 
 	// Right content pane
 	var body string
@@ -338,6 +345,6 @@ func databaseView(m model) string {
 	for len(bodyLines) < inner {
 		bodyLines = append(bodyLines, "")
 	}
-	contentPane := stylePanelBorderFocused.Width(contentW).Height(inner).Render(strings.Join(bodyLines, "\n"))
+	contentPane := overlayTitle(stylePanelBorderFocused.Width(contentW).Height(inner).Render(strings.Join(bodyLines, "\n")), " Result ")
 	return lipgloss.JoinHorizontal(lipgloss.Top, menuPane, contentPane)
 }

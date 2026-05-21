@@ -26,6 +26,12 @@ const (
 	pvGiveCurrency
 	pvGiveFactionRep
 	pvGiveLandsraadScrip
+	pvSetVitals
+	pvSetTechPoints
+	pvSetSkillPoints
+	pvAddPlayerXP
+	pvSetProgression
+	pvUnlockAllSkills
 	pvAwardXP
 	pvSQL
 	pvSQLResult
@@ -83,7 +89,13 @@ var menuItems = []menuItem{
 	{"Give Currency", pvGiveCurrency},
 	{"Give Faction Rep", pvGiveFactionRep},
 	{"Give Landsraad Scrip", pvGiveLandsraadScrip},
-	{"Award XP", pvAwardXP},
+	{"Set Health/Hydration", pvSetVitals},
+	{"Set Tech Points", pvSetTechPoints},
+	{"Set Skill Points", pvSetSkillPoints},
+	{"Add Player XP", pvAddPlayerXP},
+	{"Set Progression", pvSetProgression},
+	{"Unlock All Skills", pvUnlockAllSkills},
+	{"Award Spec XP", pvAwardXP},
 	{"Kick Player", pvKickPlayer},
 	{"Delete Item", pvDeleteItem},
 	{"Reset Spec", pvResetSpec},
@@ -99,25 +111,25 @@ func rebuildPlayersTable(m model) model {
 	w, h := m.tableArea()
 	s := table.DefaultStyles()
 	s.Selected = styleTableSel
-	s.Header = styleTableHdr.
-		BorderStyle(lipgloss.NormalBorder()).
-		BorderForeground(clrOrange).
-		BorderBottom(true)
+	s.Header = styleTableHdr.Padding(0, 1)
+	s.Cell = styleNormal.Padding(0, 1)
 
 	switch m.pl.view {
 	case pvPlayers:
 		cols := []table.Column{
 			{Title: "ID", Width: 8},
 			{Title: "Name", Width: 20},
+			{Title: "Status", Width: 12},
 			{Title: "Class", Width: 18},
 			{Title: "Map", Width: 16},
 			{Title: "Faction", Width: 10},
 			{Title: "Bld/Tot", Width: 9},
 		}
-		fixed := 8 + 20 + 16 + 10 + 9 + 5*3
+		fixed := 8 + 20 + 12 + 18 + 16 + 10 + 9 + 6*3
 		extra := w - fixed - 2
-		if extra > 10 {
-			cols[2].Width = extra
+		if extra > 0 {
+			cols[1].Width += extra / 2
+			cols[4].Width += extra - extra/2
 		}
 		var rows []table.Row
 		for _, p := range m.pl.players {
@@ -130,6 +142,7 @@ func rebuildPlayersTable(m model) model {
 			rows = append(rows, table.Row{
 				fmt.Sprintf("%d", p.ID),
 				p.Name,
+				p.Status,
 				p.Class,
 				p.Map,
 				factionDisplayName(p.FactionID),
@@ -267,6 +280,24 @@ func rebuildPlayersTable(m model) model {
 
 func playersUpdate(msg tea.Msg, m model) (model, tea.Cmd) {
 	switch msg := msg.(type) {
+	case msgPlayersBackground:
+		if msg.err == nil {
+			m.pl.players = msg.rows
+			if m.pl.view == pvPlayers {
+				m = rebuildPlayersTable(m)
+			}
+		}
+		return m, nil
+
+	case msgOnlineStateBackground:
+		if msg.err == nil {
+			m.pl.onlineState = msg.rows
+			if m.pl.view == pvOnlineState {
+				m = rebuildPlayersTable(m)
+			}
+		}
+		return m, nil
+
 	case msgPlayers:
 		if msg.err != nil {
 			m.statusMsg, m.statusIsOK = msg.err.Error(), false
@@ -473,7 +504,7 @@ func playersActivateMenu(m model) (model, tea.Cmd) {
 	case pvGiveItem:
 		return playersStartWizard(pvGiveItem, []inputStep{
 			{prompt: "Player name", hint: "type name, Tab to autocomplete"},
-			{prompt: "Item template", hint: "e.g. MelangeSpice  (Tab to autocomplete)"},
+			{prompt: "Item template", hint: "e.g. MelangeSpice; SolarisCoin is routed to currency"},
 			{prompt: "Quantity", hint: "default: 1"},
 			{prompt: "Quality level", hint: "0 = default, 1-4 for higher tier"},
 		}, m)
@@ -493,6 +524,39 @@ func playersActivateMenu(m model) (model, tea.Cmd) {
 			{prompt: "Player name", hint: "type name, Tab to autocomplete"},
 			{prompt: "Scrip delta", hint: "amount to add (negative to subtract)"},
 		}, m)
+	case pvSetVitals:
+		return playersStartWizard(pvSetVitals, []inputStep{
+			{prompt: "Player name", hint: "type name, Tab to autocomplete"},
+			{prompt: "Health", hint: "sets total and current max health"},
+			{prompt: "Hydration", hint: "sets base and current hydration"},
+		}, m)
+	case pvSetTechPoints:
+		return playersStartWizard(pvSetTechPoints, []inputStep{
+			{prompt: "Player name", hint: "type name, Tab to autocomplete"},
+			{prompt: "Tech points", hint: "sets unspent tech points only"},
+		}, m)
+	case pvSetSkillPoints:
+		return playersStartWizard(pvSetSkillPoints, []inputStep{
+			{prompt: "Player name", hint: "type name, Tab to autocomplete"},
+			{prompt: "Skill points", hint: "sets FLevelComponent UnspentSkillPoints"},
+		}, m)
+	case pvAddPlayerXP:
+		return playersStartWizard(pvAddPlayerXP, []inputStep{
+			{prompt: "Player name", hint: "type name, Tab to autocomplete"},
+			{prompt: "XP to add", hint: "adds to FLevelComponent TotalXPEarned"},
+		}, m)
+	case pvSetProgression:
+		return playersStartWizard(pvSetProgression, []inputStep{
+			{prompt: "Player name", hint: "type name, Tab to autocomplete"},
+			{prompt: "Total XP", hint: "sets FLevelComponent TotalXPEarned"},
+			{prompt: "Total skill points", hint: "sets FLevelComponent TotalSkillPoints"},
+			{prompt: "Unspent skill points", hint: "sets FLevelComponent UnspentSkillPoints"},
+			{prompt: "Tech points", hint: "sets TechKnowledgePlayerComponent points"},
+		}, m)
+	case pvUnlockAllSkills:
+		return playersStartWizard(pvUnlockAllSkills, []inputStep{
+			{prompt: "Player name", hint: "sets all FLevelComponent ModuleData SkillPointsSpent to at least 1"},
+		}, m)
 	case pvAwardXP:
 		return playersStartWizard(pvAwardXP, []inputStep{
 			{prompt: "Player name", hint: "type name, Tab to autocomplete"},
@@ -501,7 +565,7 @@ func playersActivateMenu(m model) (model, tea.Cmd) {
 		}, m)
 	case pvSQL:
 		return playersStartWizard(pvSQL, []inputStep{
-			{prompt: "SQL", hint: "SELECT … (results capped at 200 rows)"},
+			{prompt: "SQL", hint: "SELECT / UPDATE / INSERT / DELETE … (SELECT results capped at 200 rows)"},
 		}, m)
 	case pvOnlineState:
 		return m, func() tea.Msg { return cmdFetchOnlineState() }
@@ -536,7 +600,7 @@ func playersStartWizard(target playerView, steps []inputStep, m model) (model, t
 func playersIsInputState(m model) bool {
 	switch m.pl.view {
 	case pvGiveItem, pvGiveCurrency, pvGiveFactionRep, pvGiveLandsraadScrip, pvAwardXP, pvSQL, pvInventory,
-		pvKickPlayer, pvDeleteItem, pvResetSpec:
+		pvKickPlayer, pvDeleteItem, pvResetSpec, pvSetVitals, pvSetTechPoints, pvSetSkillPoints, pvAddPlayerXP, pvSetProgression, pvUnlockAllSkills:
 		return len(m.pl.inputSteps) > 0 && m.pl.inputCursor < len(m.pl.inputSteps)
 	}
 	return false
@@ -613,6 +677,13 @@ func playersExecuteWizard(m model) (model, tea.Cmd) {
 	parseInt32 := func(s string, def int32) int32 {
 		return int32(parseInt(s, int64(def)))
 	}
+	parseFloat := func(s string, def float64) float64 {
+		v, err := strconv.ParseFloat(strings.TrimSpace(s), 64)
+		if err != nil {
+			return def
+		}
+		return v
+	}
 
 	// Resolve a player name to their pawn ID (for inventory/items/XP).
 	lookupPawnID := func(name string) int64 {
@@ -669,6 +740,45 @@ func playersExecuteWizard(m model) (model, tea.Cmd) {
 		m.pl.view = pvMenu
 		return m, cmdGiveLandsraadScrip(controllerID, delta)
 
+	case pvSetVitals:
+		playerID := lookupPawnID(vals[0].value)
+		health := parseFloat(vals[1].value, 0)
+		hydration := parseFloat(vals[2].value, 0)
+		m.pl.view = pvMenu
+		return m, cmdSetPlayerVitals(playerID, health, hydration)
+
+	case pvSetTechPoints:
+		playerID := lookupPawnID(vals[0].value)
+		points := parseInt(vals[1].value, 0)
+		m.pl.view = pvMenu
+		return m, cmdSetTechPoints(playerID, points)
+
+	case pvSetSkillPoints:
+		playerID := lookupPawnID(vals[0].value)
+		points := parseInt(vals[1].value, 0)
+		m.pl.view = pvMenu
+		return m, cmdSetSkillPoints(playerID, points)
+
+	case pvAddPlayerXP:
+		playerID := lookupPawnID(vals[0].value)
+		delta := parseInt(vals[1].value, 0)
+		m.pl.view = pvMenu
+		return m, cmdAddPlayerXP(playerID, delta)
+
+	case pvSetProgression:
+		playerID := lookupPawnID(vals[0].value)
+		totalXP := parseInt(vals[1].value, 0)
+		totalSkill := parseInt(vals[2].value, 0)
+		unspentSkill := parseInt(vals[3].value, 0)
+		techPoints := parseInt(vals[4].value, 0)
+		m.pl.view = pvMenu
+		return m, cmdSetProgression(playerID, totalXP, totalSkill, unspentSkill, techPoints)
+
+	case pvUnlockAllSkills:
+		playerID := lookupPawnID(vals[0].value)
+		m.pl.view = pvMenu
+		return m, cmdUnlockAllSkills(playerID)
+
 	case pvAwardXP:
 		playerID := lookupPawnID(vals[0].value)
 		track := strings.TrimSpace(vals[1].value)
@@ -704,7 +814,7 @@ func playersExecuteWizard(m model) (model, tea.Cmd) {
 // ── view rendering ────────────────────────────────────────────────────────────
 
 func playersView(m model) string {
-	menuW := 24
+	menuW := adaptiveMenuWidth(m.width)
 	contentW := m.width - menuW - 1
 	bodyH := m.height - 2
 	if bodyH < 4 {
@@ -803,7 +913,7 @@ func renderPlayersContentPane(m model, w, h int) string {
 		title = fmt.Sprintf(" Online State (%d players) ", len(m.pl.onlineState))
 		body = m.pl.tbl.View()
 
-	case pvGiveItem, pvGiveCurrency, pvGiveFactionRep, pvGiveLandsraadScrip, pvAwardXP, pvSQL,
+	case pvGiveItem, pvGiveCurrency, pvGiveFactionRep, pvGiveLandsraadScrip, pvSetVitals, pvSetTechPoints, pvSetSkillPoints, pvAddPlayerXP, pvSetProgression, pvUnlockAllSkills, pvAwardXP, pvSQL,
 		pvKickPlayer, pvResetSpec:
 		if len(m.pl.inputSteps) > 0 && m.pl.inputCursor < len(m.pl.inputSteps) {
 			step := m.pl.inputSteps[m.pl.inputCursor]
@@ -846,32 +956,56 @@ func renderPlayersContentPane(m model, w, h int) string {
 }
 
 func renderPlayersWelcome(m model, w, h int) string {
+	boxW := 58
+	if w < boxW+4 {
+		boxW = w - 4
+	}
+	if boxW < 42 {
+		boxW = 42
+	}
+	row := func(label, desc string) string {
+		textW := boxW - 4
+		line := fmt.Sprintf("%-15s · %s", label, desc)
+		if len([]rune(line)) > textW {
+			line = string([]rune(line)[:textW-1]) + "…"
+		}
+		return styleDim.Render("  │ " + fmt.Sprintf("%-*s", textW, line) + " │")
+	}
 	lines := []string{
 		"",
-		styleOK.Render("  SSH → Kubernetes → PostgreSQL"),
-		styleDim.Render("  " + sshHost + "  ▸  cluster pod  ▸  port " + fmt.Sprintf("%d", dbPort)),
+		styleOK.Render("  AMP local DB → PostgreSQL"),
+		styleDim.Render("  127.0.0.1  ▸  port " + fmt.Sprintf("%d", dbPort)),
 		"",
 		styleNormal.Render("  Select an action from the menu on the left."),
+		styleHelp.Render("  Tip: many live values are cached by the server; edit offline, then rejoin."),
 		"",
-		styleDim.Render("  ╭─ Quick reference ─────────────────────────╮"),
-		styleDim.Render("  │  Players       · list actors in world      │"),
-		styleDim.Render("  │  Inventory     · select player then enter  │"),
-		styleDim.Render("  │  Give Item     · inject item directly       │"),
-		styleDim.Render("  │  Give Currency · add / subtract Solaris     │"),
-		styleDim.Render("  │  Faction Rep   · adjust per-faction scrips  │"),
-		styleDim.Render("  │  Landsraad     · add scrip to current house │"),
-		styleDim.Render("  │  Award XP      · add XP to any skill track  │"),
-		styleDim.Render("  │  Online State  · who is online / last seen  │"),
-		styleDim.Render("  │  Kick Player   · set LoggingOut, no data lost  │"),
-		styleDim.Render("  │  Delete Item   · remove item by ID          │"),
-		styleDim.Render("  │  Reset Spec    · clear XP tracks/keystones  │"),
-		styleDim.Render("  │  SQL           · free-form query            │"),
-		styleDim.Render("  ╰────────────────────────────────────────────╯"),
+		styleDim.Render("  ╭" + strings.Repeat("─", boxW-2) + "╮"),
+		row("Players", "list actors in world"),
+		row("Inventory", "select player, Enter to open"),
+		row("Give Item", "inject item directly"),
+		row("Currency", "add/subtract Solaris"),
+		row("Health/Hyd.", "set max health and water"),
+		row("Tech Points", "set unspent research points"),
+		row("Progression", "set XP, skill and tech points"),
+		row("Unlock Skills", "set modules learned"),
+		row("Spec XP", "add specialization-track XP"),
+		row("Kick Player", "sets LoggingOut if DB row exists"),
+		row("SQL", "free-form query / update"),
+		styleDim.Render("  ╰" + strings.Repeat("─", boxW-2) + "╯"),
 	}
 	for len(lines) < h {
 		lines = append(lines, "")
 	}
 	return strings.Join(lines[:h], "\n")
+}
+
+func requiresOfflineReload(v playerView) bool {
+	switch v {
+	case pvGiveItem, pvDeleteItem, pvSetVitals, pvSetTechPoints, pvSetSkillPoints, pvAddPlayerXP, pvSetProgression, pvUnlockAllSkills, pvAwardXP, pvResetSpec:
+		return true
+	default:
+		return false
+	}
 }
 
 func renderPlayersWizardStep(m model, step inputStep, w, h int) string {
@@ -881,7 +1015,16 @@ func renderPlayersWizardStep(m model, step inputStep, w, h int) string {
 	sb.WriteString("\n")
 	sb.WriteString(styleDim.Render("  " + step.hint))
 	sb.WriteString("\n\n")
-	sb.WriteString("  " + m.pl.textInput.View())
+	input := m.pl.textInput
+	if w > 10 {
+		input.SetWidth(w - 6)
+	}
+	sb.WriteString("  " + input.View())
+
+	if requiresOfflineReload(m.pl.view) {
+		sb.WriteString("\n")
+		sb.WriteString(styleHelp.Render("  Note: server caches this while online — leave/kick, edit, then rejoin."))
+	}
 
 	cur := strings.ToLower(m.pl.textInput.Value())
 	if m.pl.inputCursor == 0 {
@@ -995,9 +1138,12 @@ func itemSuggestions(cur string, n int) []string {
 			if cur != "" && !strings.Contains(strings.ToLower(rule.Name), cur) {
 				continue
 			}
-			template := k
+			template := rule.TemplateID
+			if template == "" {
+				template = k
+			}
 			for _, t := range dbItemTemplates {
-				if strings.ToLower(t) == k {
+				if strings.EqualFold(t, template) {
 					template = t
 					break
 				}
@@ -1050,6 +1196,18 @@ func wizardTitlePV(s playerView) string {
 		return "Give Faction Rep"
 	case pvGiveLandsraadScrip:
 		return "Give Landsraad Scrip"
+	case pvSetVitals:
+		return "Set Health/Hydration"
+	case pvSetTechPoints:
+		return "Set Tech Points"
+	case pvSetSkillPoints:
+		return "Set Skill Points"
+	case pvAddPlayerXP:
+		return "Add Player XP"
+	case pvSetProgression:
+		return "Set Progression"
+	case pvUnlockAllSkills:
+		return "Unlock All Skills"
 	case pvAwardXP:
 		return "Award XP"
 	case pvSQL:

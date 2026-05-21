@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"time"
 
 	"charm.land/bubbles/v2/table"
 	tea "charm.land/bubbletea/v2"
@@ -26,13 +27,12 @@ var duneItemNames map[string]duneItemName
 // ── tab constants ─────────────────────────────────────────────────────────────
 
 const (
-	tabBattlegroup = 0
-	tabPlayers     = 1
-	tabDatabase    = 2
-	tabLogs        = 3
+	tabPlayers  = 0
+	tabDatabase = 1
+	tabLogs     = 2
 )
 
-var tabLabels = [4]string{"Battlegroup", "Players", "Database", "Logs"}
+var tabLabels = [3]string{"Players", "Database", "Logs"}
 
 // ── palette / styles ─────────────────────────────────────────────────────────
 
@@ -96,6 +96,7 @@ type playerInfo struct {
 	Class        string
 	Map          string
 	FactionID    int16
+	Status       string
 }
 
 type itemInfo struct {
@@ -128,11 +129,12 @@ type specTrack struct {
 }
 
 type itemRule struct {
-	Name     string  `json:"name"`
-	StackMax int64   `json:"stack_max"`
-	Volume   float64 `json:"volume"`
-	Tier     int     `json:"tier"`
-	Rarity   string  `json:"rarity"`
+	TemplateID string  `json:"-"`
+	Name       string  `json:"name"`
+	StackMax   int64   `json:"stack_max"`
+	Volume     float64 `json:"volume"`
+	Tier       int     `json:"tier"`
+	Rarity     string  `json:"rarity"`
 }
 
 type itemDataFile struct {
@@ -156,6 +158,9 @@ type msgPlayers struct {
 	rows []playerInfo
 	err  error
 }
+type msgPlayersBackground msgPlayers
+type msgOnlineStateBackground msgOnlineState
+type msgAutoRefreshTick time.Time
 type msgInventory struct {
 	rows []itemInfo
 	err  error
@@ -197,7 +202,6 @@ type model struct {
 	statusIsOK bool
 
 	pl PlayersState
-	bg BattlegroupState
 	db DatabaseState
 	lg LogsState
 }
@@ -216,6 +220,12 @@ func (m model) Init() tea.Cmd {
 	return cmdConnect
 }
 
+func cmdAutoRefreshTick() tea.Cmd {
+	return tea.Tick(2*time.Second, func(t time.Time) tea.Msg {
+		return msgAutoRefreshTick(t)
+	})
+}
+
 // ── update ────────────────────────────────────────────────────────────────────
 
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -224,6 +234,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.width = msg.Width
 		m.height = msg.Height
 		m = rebuildPlayersTable(m)
+		if len(m.db.tables) > 0 {
+			w, h := m.tableArea()
+			m.db.tbl = buildTablesWidget(m.db.tables, w)
+			m.db.tbl.SetHeight(h)
+		}
 		// Resize the logs viewport to match the new terminal size
 		m.lg.vp.SetWidth(msg.Width - 4)
 		h := msg.Height - 8
@@ -238,12 +253,27 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.statusMsg, m.statusIsOK = msg.err.Error(), false
 		} else {
 			m.connected = true
-			m.statusMsg = "Connected → " + sshHost
+			m.statusMsg = "Connected → AMP local DB"
 			m.statusIsOK = true
 			m.activeTab = tabPlayers
-			return m, tea.Batch(tea.Cmd(cmdFetchPlayers), tea.Cmd(cmdFetchItemTemplates))
+			return m, tea.Batch(tea.Cmd(cmdFetchPlayers), tea.Cmd(cmdFetchItemTemplates), cmdAutoRefreshTick())
 		}
 		return m, nil
+
+	case msgAutoRefreshTick:
+		if !m.connected {
+			return m, nil
+		}
+		cmds := []tea.Cmd{cmdAutoRefreshTick(), cmdFetchPlayersBackground()}
+		if m.activeTab == tabPlayers {
+			switch m.pl.view {
+			case pvPlayers:
+				cmds = append(cmds, tea.Cmd(cmdFetchStructureCounts))
+			case pvOnlineState:
+				cmds = append(cmds, cmdFetchOnlineStateBackground())
+			}
+		}
+		return m, tea.Batch(cmds...)
 
 	case msgItemTemplates:
 		// Merge (in priority order): DB templates → duneItemNames → itemData keys.
@@ -281,20 +311,13 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if !playersIsInputState(m) {
 			switch k {
 			case "1":
-				m.activeTab = tabBattlegroup
-				return m, nil
-			case "2":
 				m.activeTab = tabPlayers
 				return m, nil
-			case "3":
+			case "2":
 				m.activeTab = tabDatabase
 				return m, nil
-			case "4":
+			case "3":
 				m.activeTab = tabLogs
-				if len(m.lg.pods) == 0 && !m.lg.loadingPods {
-					m.lg.loadingPods = true
-					return m, tea.Cmd(cmdFetchLogPods)
-				}
 				return m, nil
 			}
 		}
@@ -302,8 +325,6 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	// Delegate to the active tab's update handler.
 	switch m.activeTab {
-	case tabBattlegroup:
-		return battlegroupUpdate(msg, m)
 	case tabDatabase:
 		return databaseUpdate(msg, m)
 	case tabLogs:
@@ -318,8 +339,22 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 // tableArea returns the width/height available for a table inside the right
 // content pane (accounting for panel border).
+func adaptiveMenuWidth(totalW int) int {
+	menuW := 28
+	if totalW < 100 {
+		menuW = 24
+	}
+	if totalW < 80 {
+		menuW = 20
+	}
+	if totalW > 130 {
+		menuW = 30
+	}
+	return menuW
+}
+
 func (m model) tableArea() (w, h int) {
-	menuW := 24
+	menuW := adaptiveMenuWidth(m.width)
 	bodyH := m.height - 2 // title + bottom bar
 
 	contentW := m.width - menuW - 1 // gap between panes
@@ -335,7 +370,25 @@ func (m model) tableArea() (w, h int) {
 	return innerW, innerH
 }
 
+func fitTableColumns(cols []table.Column, w int) []table.Column {
+	if len(cols) == 0 || w <= 0 {
+		return cols
+	}
+	out := append([]table.Column(nil), cols...)
+	total := 0
+	for _, c := range out {
+		if c.Width > 0 {
+			total += c.Width + 2 // bubbles/table default cell padding: one each side
+		}
+	}
+	if extra := w - total; extra > 0 {
+		out[len(out)-1].Width += extra
+	}
+	return out
+}
+
 func newTable(cols []table.Column, rows []table.Row, w, h int, s table.Styles) table.Model {
+	cols = fitTableColumns(cols, w)
 	t := table.New(
 		table.WithColumns(cols),
 		table.WithRows(rows),
@@ -377,8 +430,6 @@ func (m model) renderFrame() string {
 		body = m.renderConnectingPane()
 	} else {
 		switch m.activeTab {
-		case tabBattlegroup:
-			body = battlegroupView(m)
 		case tabPlayers:
 			body = playersView(m)
 		case tabDatabase:
@@ -423,6 +474,7 @@ func renderStatusBar(m model) string {
 	if m.connected {
 		dot = styleOK.Render("●")
 	}
+	target := "AMP local DB"
 	msg := m.statusMsg
 	if msg != "" {
 		if m.statusIsOK {
@@ -431,12 +483,12 @@ func renderStatusBar(m model) string {
 			msg = styleErr.Render(msg)
 		}
 	} else {
-		msg = styleHelp.Render("↑↓/jk move  enter select  esc back  tab autocomplete  q quit")
+		msg = styleHelp.Render("↑↓/jk move  enter select  esc back  tab complete  r refresh  q quit")
 	}
 	return lipgloss.NewStyle().
 		Width(m.width).
 		Background(clrPanel).
-		Render(fmt.Sprintf(" %s %s  %s", dot, sshHost, msg))
+		Render(fmt.Sprintf(" %s %s  %s", dot, target, msg))
 }
 
 func (m model) renderConnectingPane() string {
@@ -444,11 +496,11 @@ func (m model) renderConnectingPane() string {
 	if bodyH < 4 {
 		bodyH = 4
 	}
-	menuW := 24
+	menuW := adaptiveMenuWidth(m.width)
 	contentW := m.width - menuW - 1
 
 	inner := bodyH - 2
-	body := styleDim.Render("\n  Establishing SSH tunnel to " + sshHost + "…")
+	body := styleDim.Render(fmt.Sprintf("\n  Connecting to local PostgreSQL on 127.0.0.1:%d…", dbPort))
 
 	rendered := stylePanelBorder.Width(contentW).Height(inner).Render(body)
 	content := overlayTitle(rendered, " Connecting… ")
@@ -465,7 +517,7 @@ func (m model) renderPlaceholder() string {
 	if bodyH < 4 {
 		bodyH = 4
 	}
-	menuW := 24
+	menuW := adaptiveMenuWidth(m.width)
 	contentW := m.width - menuW - 1
 	inner := bodyH - 2
 
