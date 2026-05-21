@@ -14,6 +14,26 @@ import (
 
 // ── data fetch commands ───────────────────────────────────────────────────────
 
+func cmdFetchPlayersBackground() tea.Cmd {
+	return func() tea.Msg {
+		msg := cmdFetchPlayers()
+		if players, ok := msg.(msgPlayers); ok {
+			return msgPlayersBackground(players)
+		}
+		return msg
+	}
+}
+
+func cmdFetchOnlineStateBackground() tea.Cmd {
+	return func() tea.Msg {
+		msg := cmdFetchOnlineState()
+		if online, ok := msg.(msgOnlineState); ok {
+			return msgOnlineStateBackground(online)
+		}
+		return msg
+	}
+}
+
 func cmdFetchPlayers() tea.Msg {
 	if globalDB == nil {
 		return msgPlayers{err: fmt.Errorf("not connected")}
@@ -25,7 +45,8 @@ func cmdFetchPlayers() tea.Msg {
 		       COALESCE(ps.player_controller_id, 0),
 		       a.class,
 		       COALESCE(a.map, ''),
-		       COALESCE(pf.faction_id, 0)
+		       COALESCE(pf.faction_id, 0),
+		       COALESCE(ps.online_status::text, '')
 		FROM dune.actors a
 		LEFT JOIN dune.player_state ps ON ps.account_id = a.owner_account_id
 		LEFT JOIN dune.encrypted_accounts e ON e.id = a.owner_account_id
@@ -40,7 +61,7 @@ func cmdFetchPlayers() tea.Msg {
 	var players []playerInfo
 	for rows.Next() {
 		var p playerInfo
-		if err := rows.Scan(&p.ID, &p.AccountID, &p.Name, &p.ControllerID, &p.Class, &p.Map, &p.FactionID); err != nil {
+		if err := rows.Scan(&p.ID, &p.AccountID, &p.Name, &p.ControllerID, &p.Class, &p.Map, &p.FactionID, &p.Status); err != nil {
 			continue
 		}
 		p.Class = shortClass(p.Class)
@@ -180,22 +201,28 @@ func cmdRunSQL(sql string) tea.Cmd {
 		if globalDB == nil {
 			return msgSQL{err: fmt.Errorf("not connected")}
 		}
+		sql = strings.TrimSpace(sql)
+		if sql == "" {
+			return msgSQL{err: fmt.Errorf("SQL required")}
+		}
+
 		rows, err := globalDB.Query(context.Background(), sql)
 		if err != nil {
 			return msgSQL{err: err}
 		}
-		defer rows.Close()
 
 		var sb strings.Builder
 		descs := rows.FieldDescriptions()
-		headers := make([]string, len(descs))
-		for i, d := range descs {
-			headers[i] = string(d.Name)
+		if len(descs) > 0 {
+			headers := make([]string, len(descs))
+			for i, d := range descs {
+				headers[i] = string(d.Name)
+			}
+			sb.WriteString(strings.Join(headers, " │ "))
+			sb.WriteString("\n")
+			sb.WriteString(strings.Repeat("─", 80))
+			sb.WriteString("\n")
 		}
-		sb.WriteString(strings.Join(headers, " │ "))
-		sb.WriteString("\n")
-		sb.WriteString(strings.Repeat("─", 80))
-		sb.WriteString("\n")
 
 		count := 0
 		for rows.Next() && count < 200 {
@@ -214,6 +241,22 @@ func cmdRunSQL(sql string) tea.Cmd {
 		if count == 200 {
 			sb.WriteString("… (limited to 200 rows)\n")
 		}
+		if err := rows.Err(); err != nil {
+			rows.Close()
+			return msgSQL{err: err}
+		}
+		rows.Close()
+
+		tag := rows.CommandTag()
+		if len(descs) == 0 {
+			if tag.RowsAffected() >= 0 {
+				return msgSQL{result: fmt.Sprintf("OK: %s (%d rows affected)", tag.String(), tag.RowsAffected())}
+			}
+			return msgSQL{result: "OK: " + tag.String()}
+		}
+		if count == 0 {
+			sb.WriteString(fmt.Sprintf("(0 rows) — %s\n", tag.String()))
+		}
 		return msgSQL{result: sb.String()}
 	}
 }
@@ -226,7 +269,7 @@ func cmdGiveItem(playerID int64, template string, qty, quality int64) tea.Cmd {
 		if playerID == 0 {
 			return msgMutate{err: fmt.Errorf("player ID required")}
 		}
-		template = strings.TrimSpace(template)
+		template = resolveItemTemplateInput(strings.TrimSpace(template))
 		if template == "" {
 			return msgMutate{err: fmt.Errorf("item template required")}
 		}
@@ -234,6 +277,13 @@ func cmdGiveItem(playerID int64, template string, qty, quality int64) tea.Cmd {
 			return msgMutate{err: fmt.Errorf("quantity must be > 0")}
 		}
 		ctx := context.Background()
+		if isSolarisTemplate(template) {
+			controllerID, err := resolveControllerIDForPawn(ctx, playerID)
+			if err != nil {
+				return msgMutate{err: err}
+			}
+			return applySolarisDelta(ctx, controllerID, qty)
+		}
 
 		// Prefer the backpack (inventory_type=0) — that's where resources live.
 		// Fall back to the first available inventory if not found.
@@ -265,7 +315,6 @@ func cmdGiveItem(playerID int64, template string, qty, quality int64) tea.Cmd {
 		usedSlots := 0
 		usedVolume := 0.0
 		maxPos := int64(-1)
-		missingVolumes := map[string]struct{}{}
 
 		rows, err := globalDB.Query(ctx, `
 			SELECT id, template_id, stack_size, quality_level, volume_override, position_index
@@ -289,7 +338,7 @@ func cmdGiveItem(playerID int64, template string, qty, quality int64) tea.Cmd {
 			if pos > maxPos {
 				maxPos = pos
 			}
-			if quality == 0 && qLevel == 0 && tmpl == template {
+			if quality == 0 && qLevel == 0 && strings.EqualFold(tmpl, template) {
 				stacks = append(stacks, stackSlot{id: id, size: stackSize})
 			}
 			if hasVolumeCap {
@@ -302,9 +351,9 @@ func cmdGiveItem(playerID int64, template string, qty, quality int64) tea.Cmd {
 					} else if itemData.DefaultVolume > 0 {
 						itemVol = itemData.DefaultVolume
 					} else {
-						// Truly unknown — not in item-data and no volume_override.
-						missingVolumes[tmpl] = struct{}{}
-						continue
+						// Unknown templates are treated as zero-volume so admin grants
+						// are not blocked by incomplete item-data.json coverage.
+						itemVol = 0
 					}
 				} else if itemData.DefaultVolume > 0 {
 					itemVol = itemData.DefaultVolume
@@ -315,12 +364,6 @@ func cmdGiveItem(playerID int64, template string, qty, quality int64) tea.Cmd {
 		if rows.Err() != nil {
 			return msgMutate{err: rows.Err()}
 		}
-		if hasVolumeCap && len(missingVolumes) > 0 {
-			return msgMutate{err: fmt.Errorf(
-				"missing volume data for %s; add to item-data.json",
-				describeMissingTemplates(missingVolumes))}
-		}
-
 		stackMax, err := resolveStackMax(ctx, template, quality)
 		if err != nil {
 			return msgMutate{err: err}
@@ -443,30 +486,8 @@ func cmdGiveCurrency(playerID int64, amount int64) tea.Cmd {
 		if globalDB == nil {
 			return msgMutate{err: fmt.Errorf("not connected")}
 		}
-		if playerID == 0 {
-			return msgMutate{err: fmt.Errorf("player ID required")}
-		}
 		ctx := context.Background()
-		// Route through adjust_player_virtual_currency_balance for audit logging
-		// and negative-balance guards. The casts match the live function signature.
-		_, err := globalDB.Exec(ctx, `
-			SELECT dune.adjust_player_virtual_currency_balance(
-				$1::bigint,
-				dune.get_solaris_id(),
-				$2::bigint
-			)`,
-			playerID, amount)
-		if err != nil {
-			return msgMutate{err: err}
-		}
-		var balance int64
-		_ = globalDB.QueryRow(ctx, `
-			SELECT balance FROM dune.player_virtual_currency_balances
-			WHERE player_controller_id = $1::bigint AND currency_id = dune.get_solaris_id()`,
-			playerID).Scan(&balance)
-		return msgMutate{ok: fmt.Sprintf(
-			"Added %d Solaris to player %d — new balance %d",
-			amount, playerID, balance)}
+		return applySolarisDelta(ctx, playerID, amount)
 	}
 }
 
@@ -493,20 +514,287 @@ func cmdGiveLandsraadScrip(actorID int64, delta int32) tea.Cmd {
 		if err != nil {
 			return msgMutate{err: err}
 		}
-		_, err = globalDB.Exec(ctx, `
-			SELECT dune.adjust_player_virtual_currency_balance($1::bigint, $2::smallint, $3::bigint)`,
-			actorID, currencyID, int64(delta))
+		balance, err := applyCurrencyDelta(ctx, actorID, currencyID, int64(delta))
 		if err != nil {
 			return msgMutate{err: err}
 		}
-		var balance int64
-		_ = globalDB.QueryRow(ctx, `
-			SELECT balance FROM dune.player_virtual_currency_balances
-			WHERE player_controller_id = $1::bigint AND currency_id = $2::smallint`,
-			actorID, currencyID).Scan(&balance)
 		return msgMutate{ok: fmt.Sprintf(
 			"Added %d scrips (currency %d) to player %d — new balance %d",
 			delta, currencyID, actorID, balance)}
+	}
+}
+
+func cmdSetPlayerVitals(playerID int64, health, hydration float64) tea.Cmd {
+	return func() tea.Msg {
+		if globalDB == nil {
+			return msgMutate{err: fmt.Errorf("not connected")}
+		}
+		if playerID == 0 {
+			return msgMutate{err: fmt.Errorf("player ID required")}
+		}
+		if health < 0 {
+			return msgMutate{err: fmt.Errorf("health must be >= 0")}
+		}
+		if hydration < 0 {
+			return msgMutate{err: fmt.Errorf("hydration must be >= 0")}
+		}
+
+		ctx := context.Background()
+		res, err := globalDB.Exec(ctx, `
+			UPDATE dune.actors
+			SET properties = jsonb_set(
+				jsonb_set(
+					properties,
+					'{DamageableActorComponent,m_TotalMaxHealth}',
+					to_jsonb($2::float8),
+					false
+				),
+				'{DamageableActorComponent,m_CurrentMaxHealth}',
+				to_jsonb($2::float8),
+				false
+			),
+			gas_attributes = jsonb_set(
+				jsonb_set(
+					gas_attributes,
+					'{DuneHydrationAttributeSet,CurrentHydration,CurrentValue}',
+					to_jsonb($3::float8),
+					false
+				),
+				'{DuneHydrationAttributeSet,CurrentHydration,BaseValue}',
+				to_jsonb($3::float8),
+				false
+			)
+			WHERE id = $1::bigint
+			  AND class ILIKE '%PlayerCharacter%'`,
+			playerID, health, hydration)
+		if err != nil {
+			return msgMutate{err: fmt.Errorf("set vitals: %w", err)}
+		}
+		if res.RowsAffected() == 0 {
+			return msgMutate{err: fmt.Errorf("player %d not found", playerID)}
+		}
+		return msgMutate{ok: fmt.Sprintf(
+			"Set player %d health to %.2f and hydration to %.2f",
+			playerID, health, hydration)}
+	}
+}
+
+func cmdSetTechPoints(playerID int64, points int64) tea.Cmd {
+	return func() tea.Msg {
+		if globalDB == nil {
+			return msgMutate{err: fmt.Errorf("not connected")}
+		}
+		if playerID == 0 {
+			return msgMutate{err: fmt.Errorf("player ID required")}
+		}
+		if points < 0 {
+			return msgMutate{err: fmt.Errorf("tech points must be >= 0")}
+		}
+
+		ctx := context.Background()
+		res, err := globalDB.Exec(ctx, `
+			UPDATE dune.actors
+			SET properties = jsonb_set(
+				properties,
+				'{TechKnowledgePlayerComponent,m_TechKnowledgePoints}',
+				to_jsonb($2::bigint),
+				false
+			)
+			WHERE id = $1::bigint
+			  AND class ILIKE '%PlayerCharacter%'
+			  AND properties ? 'TechKnowledgePlayerComponent'`,
+			playerID, points)
+		if err != nil {
+			return msgMutate{err: fmt.Errorf("set tech points: %w", err)}
+		}
+		if res.RowsAffected() == 0 {
+			return msgMutate{err: fmt.Errorf("player %d has no TechKnowledgePlayerComponent", playerID)}
+		}
+		return msgMutate{ok: fmt.Sprintf(
+			"Set player %d tech points to %d",
+			playerID, points)}
+	}
+}
+
+func cmdSetSkillPoints(playerID int64, points int64) tea.Cmd {
+	return func() tea.Msg {
+		if globalDB == nil {
+			return msgMutate{err: fmt.Errorf("not connected")}
+		}
+		if playerID == 0 {
+			return msgMutate{err: fmt.Errorf("player ID required")}
+		}
+		if points < 0 {
+			return msgMutate{err: fmt.Errorf("skill points must be >= 0")}
+		}
+		res, err := globalDB.Exec(context.Background(), `
+			UPDATE dune.fgl_entities f
+			SET components = jsonb_set(
+				f.components,
+				'{FLevelComponent,1,UnspentSkillPoints}',
+				to_jsonb($2::bigint),
+				false
+			)
+			FROM dune.actor_fgl_entities afe
+			WHERE afe.entity_id = f.entity_id
+			  AND afe.actor_id = $1::bigint
+			  AND f.components ? 'FLevelComponent'`, playerID, points)
+		if err != nil {
+			return msgMutate{err: fmt.Errorf("set skill points: %w", err)}
+		}
+		if res.RowsAffected() == 0 {
+			return msgMutate{err: fmt.Errorf("player %d has no FLevelComponent", playerID)}
+		}
+		return msgMutate{ok: fmt.Sprintf("Set player %d unspent skill points to %d", playerID, points)}
+	}
+}
+
+func cmdAddPlayerXP(playerID int64, delta int64) tea.Cmd {
+	return func() tea.Msg {
+		if globalDB == nil {
+			return msgMutate{err: fmt.Errorf("not connected")}
+		}
+		if playerID == 0 {
+			return msgMutate{err: fmt.Errorf("player ID required")}
+		}
+		var total int64
+		err := globalDB.QueryRow(context.Background(), `
+			UPDATE dune.fgl_entities f
+			SET components = jsonb_set(
+				f.components,
+				'{FLevelComponent,1,TotalXPEarned}',
+				to_jsonb(GREATEST(COALESCE((f.components #>> '{FLevelComponent,1,TotalXPEarned}')::bigint, 0) + $2::bigint, 0)),
+				false
+			)
+			FROM dune.actor_fgl_entities afe
+			WHERE afe.entity_id = f.entity_id
+			  AND afe.actor_id = $1::bigint
+			  AND f.components ? 'FLevelComponent'
+			RETURNING (f.components #>> '{FLevelComponent,1,TotalXPEarned}')::bigint`, playerID, delta).Scan(&total)
+		if err != nil {
+			if err == pgx.ErrNoRows {
+				return msgMutate{err: fmt.Errorf("player %d has no FLevelComponent", playerID)}
+			}
+			return msgMutate{err: fmt.Errorf("add player XP: %w", err)}
+		}
+		return msgMutate{ok: fmt.Sprintf("Added %d player XP to player %d — total XP %d", delta, playerID, total)}
+	}
+}
+
+func cmdSetProgression(playerID, totalXP, totalSkillPoints, unspentSkillPoints, techPoints int64) tea.Cmd {
+	return func() tea.Msg {
+		if globalDB == nil {
+			return msgMutate{err: fmt.Errorf("not connected")}
+		}
+		if playerID == 0 {
+			return msgMutate{err: fmt.Errorf("player ID required")}
+		}
+		if totalXP < 0 || totalSkillPoints < 0 || unspentSkillPoints < 0 || techPoints < 0 {
+			return msgMutate{err: fmt.Errorf("progression values must be >= 0")}
+		}
+		ctx := context.Background()
+		tx, err := globalDB.Begin(ctx)
+		if err != nil {
+			return msgMutate{err: err}
+		}
+		defer tx.Rollback(ctx)
+
+		res, err := tx.Exec(ctx, `
+			UPDATE dune.fgl_entities f
+			SET components = jsonb_set(
+				jsonb_set(
+					jsonb_set(
+						f.components,
+						'{FLevelComponent,1,TotalXPEarned}',
+						to_jsonb($2::bigint),
+						false
+					),
+					'{FLevelComponent,1,TotalSkillPoints}',
+					to_jsonb($3::bigint),
+					false
+				),
+				'{FLevelComponent,1,UnspentSkillPoints}',
+				to_jsonb($4::bigint),
+				false
+			)
+			FROM dune.actor_fgl_entities afe
+			WHERE afe.entity_id = f.entity_id
+			  AND afe.actor_id = $1::bigint
+			  AND f.components ? 'FLevelComponent'`,
+			playerID, totalXP, totalSkillPoints, unspentSkillPoints)
+		if err != nil {
+			return msgMutate{err: fmt.Errorf("set player progression: %w", err)}
+		}
+		if res.RowsAffected() == 0 {
+			return msgMutate{err: fmt.Errorf("player %d has no FLevelComponent", playerID)}
+		}
+
+		res, err = tx.Exec(ctx, `
+			UPDATE dune.actors
+			SET properties = jsonb_set(
+				properties,
+				'{TechKnowledgePlayerComponent,m_TechKnowledgePoints}',
+				to_jsonb($2::bigint),
+				false
+			)
+			WHERE id = $1::bigint
+			  AND class ILIKE '%PlayerCharacter%'
+			  AND properties ? 'TechKnowledgePlayerComponent'`,
+			playerID, techPoints)
+		if err != nil {
+			return msgMutate{err: fmt.Errorf("set tech points: %w", err)}
+		}
+		if res.RowsAffected() == 0 {
+			return msgMutate{err: fmt.Errorf("player %d has no TechKnowledgePlayerComponent", playerID)}
+		}
+		if err := tx.Commit(ctx); err != nil {
+			return msgMutate{err: err}
+		}
+		return msgMutate{ok: fmt.Sprintf(
+			"Set player %d progression: XP %d, skill %d total/%d unspent, tech %d",
+			playerID, totalXP, totalSkillPoints, unspentSkillPoints, techPoints)}
+	}
+}
+
+func cmdUnlockAllSkills(playerID int64) tea.Cmd {
+	return func() tea.Msg {
+		if globalDB == nil {
+			return msgMutate{err: fmt.Errorf("not connected")}
+		}
+		if playerID == 0 {
+			return msgMutate{err: fmt.Errorf("player ID required")}
+		}
+		res, err := globalDB.Exec(context.Background(), `
+			UPDATE dune.fgl_entities f
+			SET components = jsonb_set(
+				f.components,
+				'{FLevelComponent,1,ModuleData}',
+				(
+					SELECT jsonb_object_agg(
+						key,
+						jsonb_set(
+							value,
+							'{SkillPointsSpent}',
+							to_jsonb(GREATEST(COALESCE((value->>'SkillPointsSpent')::integer, 0), 1)),
+							true
+						)
+					)
+					FROM jsonb_each(f.components #> '{FLevelComponent,1,ModuleData}')
+				),
+				false
+			)
+			FROM dune.actor_fgl_entities afe
+			WHERE afe.entity_id = f.entity_id
+			  AND afe.actor_id = $1::bigint
+			  AND f.components ? 'FLevelComponent'
+			  AND f.components #> '{FLevelComponent,1,ModuleData}' IS NOT NULL`, playerID)
+		if err != nil {
+			return msgMutate{err: fmt.Errorf("unlock all skills: %w", err)}
+		}
+		if res.RowsAffected() == 0 {
+			return msgMutate{err: fmt.Errorf("player %d has no FLevelComponent ModuleData", playerID)}
+		}
+		return msgMutate{ok: fmt.Sprintf("Unlocked all FLevelComponent skill modules for player %d", playerID)}
 	}
 }
 
@@ -551,14 +839,15 @@ func cmdKickPlayer(playerID int64) tea.Cmd {
 		res, err := globalDB.Exec(ctx, `
 			UPDATE dune.player_state
 			SET online_status = 'LoggingOut'::dune.playerconnectionstatus
-			WHERE player_controller_id = $1::bigint`, playerID)
+			WHERE player_pawn_id = $1::bigint
+			   OR player_controller_id = $1::bigint`, playerID)
 		if err != nil {
 			return msgMutate{err: fmt.Errorf("kick: %w", err)}
 		}
 		if res.RowsAffected() == 0 {
-			return msgMutate{err: fmt.Errorf("no player_state found for actor %d", playerID)}
+			return msgMutate{err: fmt.Errorf("no player_state found for pawn/controller actor %d", playerID)}
 		}
-		return msgMutate{ok: fmt.Sprintf("Set actor %d → LoggingOut — server will disconnect on next heartbeat", playerID)}
+		return msgMutate{ok: fmt.Sprintf("Set pawn/controller actor %d → LoggingOut — server will disconnect on next heartbeat", playerID)}
 	}
 }
 
@@ -720,6 +1009,133 @@ func cmdFetchStructureCounts() tea.Msg {
 
 // ── private helpers ───────────────────────────────────────────────────────────
 
+func resolveItemTemplateInput(input string) string {
+	input = strings.TrimSpace(input)
+	if input == "" {
+		return ""
+	}
+	for _, t := range dbItemTemplates {
+		if strings.EqualFold(t, input) {
+			return t
+		}
+	}
+	if entry, ok := duneItemNames[strings.ToLower(input)]; ok && entry.ID != "" {
+		return entry.ID
+	}
+	if itemData.Items != nil {
+		if rule, ok := itemData.Items[strings.ToLower(input)]; ok {
+			if rule.TemplateID != "" {
+				return rule.TemplateID
+			}
+		}
+	}
+	for _, entry := range duneItemNames {
+		if entry.Name != "" && strings.EqualFold(entry.Name, input) && entry.ID != "" {
+			return entry.ID
+		}
+	}
+	if itemData.Items != nil {
+		for k, rule := range itemData.Items {
+			if rule.Name != "" && strings.EqualFold(rule.Name, input) {
+				if rule.TemplateID != "" {
+					return rule.TemplateID
+				}
+				return k
+			}
+		}
+	}
+	return input
+}
+
+func isSolarisTemplate(template string) bool {
+	switch strings.ToLower(strings.TrimSpace(template)) {
+	case "solaris", "solariscoin", "solari", "solaris_coin":
+		return true
+	default:
+		return false
+	}
+}
+
+func resolveControllerIDForPawn(ctx context.Context, playerID int64) (int64, error) {
+	if playerID == 0 {
+		return 0, fmt.Errorf("player ID required")
+	}
+	var controllerID int64
+	err := globalDB.QueryRow(ctx, `
+		SELECT COALESCE(ps.player_controller_id, 0)
+		FROM dune.actors a
+		JOIN dune.player_state ps ON ps.account_id = a.owner_account_id
+		WHERE a.id = $1::bigint`, playerID).Scan(&controllerID)
+	if err != nil {
+		return 0, fmt.Errorf("find player controller: %w", err)
+	}
+	if controllerID == 0 {
+		return 0, fmt.Errorf("player %d has no controller ID", playerID)
+	}
+	return controllerID, nil
+}
+
+func applySolarisDelta(ctx context.Context, playerID int64, amount int64) tea.Msg {
+	if playerID == 0 {
+		return msgMutate{err: fmt.Errorf("player ID required")}
+	}
+	var currencyID int16
+	if err := globalDB.QueryRow(ctx, `SELECT dune.get_solaris_id()`).Scan(&currencyID); err != nil {
+		return msgMutate{err: fmt.Errorf("resolve Solaris currency id: %w", err)}
+	}
+	balance, err := applyCurrencyDelta(ctx, playerID, currencyID, amount)
+	if err != nil {
+		return msgMutate{err: err}
+	}
+	return msgMutate{ok: fmt.Sprintf(
+		"Added %d Solaris to player %d — new balance %d",
+		amount, playerID, balance)}
+}
+
+func applyCurrencyDelta(ctx context.Context, playerID int64, currencyID int16, amount int64) (int64, error) {
+	if playerID == 0 {
+		return 0, fmt.Errorf("player ID required")
+	}
+	tx, err := globalDB.Begin(ctx)
+	if err != nil {
+		return 0, err
+	}
+	defer tx.Rollback(ctx)
+
+	var balance int64
+	err = tx.QueryRow(ctx, `
+		UPDATE dune.player_virtual_currency_balances
+		SET balance = balance + $3::bigint
+		WHERE player_controller_id = $1::bigint
+		  AND currency_id = $2::smallint
+		  AND balance + $3::bigint >= 0
+		RETURNING balance`, playerID, currencyID, amount).Scan(&balance)
+	if err == nil {
+		if err := tx.Commit(ctx); err != nil {
+			return 0, err
+		}
+		return balance, nil
+	}
+	if err != pgx.ErrNoRows {
+		return 0, err
+	}
+	if amount < 0 {
+		return 0, fmt.Errorf("insufficient currency balance")
+	}
+
+	err = tx.QueryRow(ctx, `
+		INSERT INTO dune.player_virtual_currency_balances (player_controller_id, currency_id, balance)
+		VALUES ($1::bigint, $2::smallint, $3::bigint)
+		RETURNING balance`, playerID, currencyID, amount).Scan(&balance)
+	if err != nil {
+		return 0, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return 0, err
+	}
+	return balance, nil
+}
+
 func resolveStackMax(ctx context.Context, template string, quality int64) (int64, error) {
 	if quality > 0 {
 		return 1, nil
@@ -767,7 +1183,9 @@ func resolveItemVolume(ctx context.Context, template string) (float64, error) {
 	if itemData.DefaultVolume > 0 {
 		return itemData.DefaultVolume, nil
 	}
-	return 0, fmt.Errorf("volume unknown for template %s", template)
+	// Unknown templates are treated as zero-volume so item grants still work
+	// when item-data.json has no entry and the DB has no prior volume sample.
+	return 0, nil
 }
 
 func describeMissingTemplates(m map[string]struct{}) string {
